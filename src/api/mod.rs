@@ -9,13 +9,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::storage::{MemoryStore, GraphStore};
-use crate::retrieval::{RetrievalEngine, RetrievalResult, RetrievalQuery};
-use crate::models::{MemoryObject, GraphNode, GraphEdge, GraphMetadata};
+use crate::retrieval::{RetrievalEngine, RetrievalResult};
+use crate::reasoning::{ReasoningEngine, InterpretResponse};
+use crate::agents::{RetrieverAgent, VerifierAgent, SynthesizerAgent, ContradictionDetectorAgent};
+use crate::models::{MemoryObject, GraphNode, GraphEdge, GraphMetadata, AgentOutput, BeliefState};
 
 pub struct AppState {
     pub memory: Mutex<MemoryStore>,
     pub graph: Mutex<GraphStore>,
     pub retrieval: Mutex<RetrievalEngine>,
+    pub reasoning: Mutex<ReasoningEngine>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +48,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/graph/traverse", post(traverse_graph))
         .route("/api/v1/graph/path", post(find_path))
         .route("/api/v1/retrieve", post(retrieve))
+        .route("/api/v1/reason/interpret", post(interpret))
+        .route("/api/v1/reason/beliefs/:belief_id", get(get_belief))
+        .route("/api/v1/reason/conflicts", post(detect_conflicts))
+        .route("/api/v1/agents/retriever", post(run_retriever))
+        .route("/api/v1/agents/verifier", post(run_verifier))
+        .route("/api/v1/agents/synthesizer", post(run_synthesizer))
+        .route("/api/v1/agents/contradiction", post(run_contradiction_detector))
         .with_state(state)
 }
 
@@ -160,7 +170,6 @@ async fn traverse_graph(
     Json(req): Json<TraverseRequest>,
 ) -> Result<AxumJson<TraverseResponse>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    
     let depth = req.depth.unwrap_or(3);
     let start_node_id = req.start_node_id.unwrap_or_default();
     
@@ -195,10 +204,7 @@ async fn find_path(
 ) -> Result<AxumJson<FindPathResponse>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let max_depth = req.max_depth.unwrap_or(5);
-    
-    let path = graph.find_path(&req.start_id, &req.end_id, max_depth)
-        .map_err(|e| e.to_string())?;
-    
+    let path = graph.find_path(&req.start_id, &req.end_id, max_depth).map_err(|e| e.to_string())?;
     Ok(AxumJson(FindPathResponse { path }))
 }
 
@@ -220,9 +226,136 @@ async fn retrieve(
 ) -> Result<AxumJson<RetrieveResponse>, String> {
     let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
     let limit = req.limit.unwrap_or(10);
-    
-    let results = retrieval.search(&req.query, limit)
-        .map_err(|e| e.to_string())?;
-    
+    let results = retrieval.search(&req.query, limit).map_err(|e| e.to_string())?;
     Ok(AxumJson(RetrieveResponse { results }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InterpretRequest {
+    pub query: String,
+    pub context_ids: Option<Vec<String>>,
+}
+
+async fn interpret(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<InterpretRequest>,
+) -> Result<AxumJson<InterpretResponse>, String> {
+    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
+    let results = retrieval.search(&req.query, 10).map_err(|e| e.to_string())?;
+    
+    let reasoning = state.reasoning.lock().map_err(|e| e.to_string())?;
+    let response = reasoning.interpret(&req.query, results).map_err(|e| e.to_string())?;
+    
+    Ok(AxumJson(response))
+}
+
+async fn get_belief(
+    State(state): State<Arc<AppState>>,
+    Path(_belief_id): Path<String>,
+) -> Result<AxumJson<BeliefState>, String> {
+    Ok(AxumJson(BeliefState {
+        belief_id: _belief_id,
+        timestamp: chrono::Utc::now(),
+        interpretations: vec![],
+        conflict_flags: vec![],
+        state: "open".to_string(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetectConflictsRequest {
+    pub memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetectConflictsResponse {
+    pub conflicts: Vec<String>,
+}
+
+async fn detect_conflicts(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DetectConflictsRequest>,
+) -> Result<AxumJson<DetectConflictsResponse>, String> {
+    let memory = state.memory.lock().map_err(|e| e.to_string())?;
+    let mut memories = Vec::new();
+    
+    for id in &req.memory_ids {
+        if let Ok(m) = memory.get(id) {
+            memories.push(m);
+        }
+    }
+    
+    let detector = ContradictionDetectorAgent::new();
+    let agent_output = detector.execute(memories.iter().collect()).map_err(|e| e.to_string())?;
+    
+    let conflicts: Vec<String> = agent_output.outputs.iter()
+        .filter(|o| o.score > 0.0)
+        .map(|o| o.metadata.explanation.clone())
+        .collect();
+    
+    Ok(AxumJson(DetectConflictsResponse { conflicts }))
+}
+
+async fn run_retriever(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RetrieveRequest>,
+) -> Result<AxumJson<AgentOutput>, String> {
+    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
+    let results = retrieval.search(&req.query, req.limit.unwrap_or(10)).map_err(|e| e.to_string())?;
+    
+    let agent = RetrieverAgent::new();
+    let output = agent.execute(&req.query, results).map_err(|e| e.to_string())?;
+    
+    Ok(AxumJson(output))
+}
+
+async fn run_verifier(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DetectConflictsRequest>,
+) -> Result<AxumJson<AgentOutput>, String> {
+    let memory = state.memory.lock().map_err(|e| e.to_string())?;
+    let mut memories = Vec::new();
+    
+    for id in &req.memory_ids {
+        if let Ok(m) = memory.get(id) {
+            memories.push(m);
+        }
+    }
+    
+    let agent = VerifierAgent::new();
+    let output = agent.execute(memories.iter().collect()).map_err(|e| e.to_string())?;
+    
+    Ok(AxumJson(output))
+}
+
+async fn run_synthesizer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RetrieveRequest>,
+) -> Result<AxumJson<AgentOutput>, String> {
+    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
+    let results = retrieval.search(&req.query, req.limit.unwrap_or(10)).map_err(|e| e.to_string())?;
+    
+    let agent = SynthesizerAgent::new();
+    let output = agent.execute(results).map_err(|e| e.to_string())?;
+    
+    Ok(AxumJson(output))
+}
+
+async fn run_contradiction_detector(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DetectConflictsRequest>,
+) -> Result<AxumJson<AgentOutput>, String> {
+    let memory = state.memory.lock().map_err(|e| e.to_string())?;
+    let mut memories = Vec::new();
+    
+    for id in &req.memory_ids {
+        if let Ok(m) = memory.get(id) {
+            memories.push(m);
+        }
+    }
+    
+    let agent = ContradictionDetectorAgent::new();
+    let output = agent.execute(memories.iter().collect()).map_err(|e| e.to_string())?;
+    
+    Ok(AxumJson(output))
 }

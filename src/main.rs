@@ -9,10 +9,13 @@ mod storage;
 mod api;
 mod models;
 mod retrieval;
+mod reasoning;
+mod agents;
 
 use api::{AppState, create_router};
 use storage::{MemoryStore, GraphStore};
 use retrieval::RetrievalEngine;
+use reasoning::ReasoningEngine;
 
 #[tokio::main]
 async fn main() {
@@ -38,11 +41,13 @@ async fn main() {
         .expect("Failed to initialize graph store");
     let retrieval_engine = RetrievalEngine::new(data_dir.clone())
         .expect("Failed to initialize retrieval engine");
+    let reasoning_engine = ReasoningEngine::new();
 
     let state = Arc::new(AppState {
         memory: Mutex::new(memory_store),
         graph: Mutex::new(graph_store),
         retrieval: Mutex::new(retrieval_engine),
+        reasoning: Mutex::new(reasoning_engine),
     });
 
     let app = create_router(state).layer(TraceLayer::new_for_http());
