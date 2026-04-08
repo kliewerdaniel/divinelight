@@ -4,3 +4,7 @@ pub mod models;
 pub mod retrieval;
 pub mod reasoning;
 pub mod agents;
+pub mod backup;
+
+#[cfg(test)]
+mod tests;

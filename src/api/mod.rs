@@ -55,6 +55,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/agents/verifier", post(run_verifier))
         .route("/api/v1/agents/synthesizer", post(run_synthesizer))
         .route("/api/v1/agents/contradiction", post(run_contradiction_detector))
+        .route("/api/v1/backup/create", post(create_backup))
+        .route("/api/v1/backup/restore", post(restore_backup))
+        .route("/api/v1/backup/export", post(export_data))
+        .route("/api/v1/backup/import", post(import_data))
         .with_state(state)
 }
 
@@ -358,4 +362,97 @@ async fn run_contradiction_detector(
     let output = agent.execute(memories.iter().collect()).map_err(|e| e.to_string())?;
     
     Ok(AxumJson(output))
+}
+
+use crate::backup::{BackupManager, BackupManifest};
+
+#[derive(Debug, Deserialize)]
+pub struct BackupRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackupResponse {
+    pub status: String,
+    pub manifest: Option<BackupManifest>,
+}
+
+async fn create_backup(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BackupRequest>,
+) -> Result<AxumJson<BackupResponse>, String> {
+    let data_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("divinelight");
+    
+    let backup_path = std::path::PathBuf::from(&req.path);
+    let manager = BackupManager::new(data_dir);
+    
+    match manager.create_backup(&backup_path) {
+        Ok(manifest) => Ok(AxumJson(BackupResponse {
+            status: "success".to_string(),
+            manifest: Some(manifest),
+        })),
+        Err(e) => Err(e.to_string())
+    }
+}
+
+async fn restore_backup(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<BackupRequest>,
+) -> Result<AxumJson<BackupResponse>, String> {
+    let data_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("divinelight");
+    
+    let backup_path = std::path::PathBuf::from(&req.path);
+    let manager = BackupManager::new(data_dir);
+    
+    match manager.restore_backup(&backup_path) {
+        Ok(_) => Ok(AxumJson(BackupResponse {
+            status: "success".to_string(),
+            manifest: None,
+        })),
+        Err(e) => Err(e.to_string())
+    }
+}
+
+async fn export_data(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<BackupRequest>,
+) -> Result<AxumJson<BackupResponse>, String> {
+    let data_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("divinelight");
+    
+    let export_path = std::path::PathBuf::from(&req.path);
+    let manager = BackupManager::new(data_dir);
+    
+    match manager.export_data(&export_path) {
+        Ok(_) => Ok(AxumJson(BackupResponse {
+            status: "success".to_string(),
+            manifest: None,
+        })),
+        Err(e) => Err(e.to_string())
+    }
+}
+
+async fn import_data(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BackupRequest>,
+) -> Result<AxumJson<BackupResponse>, String> {
+    let data_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("divinelight");
+    
+    let import_path = std::path::PathBuf::from(&req.path);
+    let manager = BackupManager::new(data_dir);
+    
+    match manager.import_data(&import_path) {
+        Ok(count) => Ok(AxumJson(BackupResponse {
+            status: format!("Imported {} memories", count),
+            manifest: None,
+        })),
+        Err(e) => Err(e.to_string())
+    }
 }

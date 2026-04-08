@@ -11,11 +11,13 @@ mod models;
 mod retrieval;
 mod reasoning;
 mod agents;
+mod backup;
 
 use api::{AppState, create_router};
 use storage::{MemoryStore, GraphStore};
 use retrieval::RetrievalEngine;
 use reasoning::ReasoningEngine;
+use crate::backup::BackupManager;
 
 #[tokio::main]
 async fn main() {
@@ -27,12 +29,80 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("Starting DivineLight server");
-
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("divinelight");
 
+    let args: Vec<String> = std::env::args().collect();
+    
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "backup" => {
+                if let Some(path) = args.get(2) {
+                    let manager = BackupManager::new(data_dir.clone());
+                    match manager.create_backup(&std::path::PathBuf::from(path)) {
+                        Ok(manifest) => {
+                            println!("Backup created successfully!");
+                            println!("Memories: {}, Nodes: {}, Edges: {}", 
+                                manifest.memory_count, manifest.node_count, manifest.edge_count);
+                        }
+                        Err(e) => println!("Backup failed: {}", e),
+                    }
+                } else {
+                    println!("Usage: divinelight backup <path>");
+                }
+                return;
+            }
+            "restore" => {
+                if let Some(path) = args.get(2) {
+                    let manager = BackupManager::new(data_dir.clone());
+                    match manager.restore_backup(&std::path::PathBuf::from(path)) {
+                        Ok(_) => println!("Restore completed successfully!"),
+                        Err(e) => println!("Restore failed: {}", e),
+                    }
+                } else {
+                    println!("Usage: divinelight restore <path>");
+                }
+                return;
+            }
+            "export" => {
+                if let Some(path) = args.get(2) {
+                    let manager = BackupManager::new(data_dir.clone());
+                    match manager.export_data(&std::path::PathBuf::from(path)) {
+                        Ok(_) => println!("Export completed successfully!"),
+                        Err(e) => println!("Export failed: {}", e),
+                    }
+                } else {
+                    println!("Usage: divinelight export <path>");
+                }
+                return;
+            }
+            "import" => {
+                if let Some(path) = args.get(2) {
+                    let manager = BackupManager::new(data_dir.clone());
+                    match manager.import_data(&std::path::PathBuf::from(path)) {
+                        Ok(count) => println!("Imported {} memories", count),
+                        Err(e) => println!("Import failed: {}", e),
+                    }
+                } else {
+                    println!("Usage: divinelight import <path>");
+                }
+                return;
+            }
+            "status" => {
+                let manager = BackupManager::new(data_dir.clone());
+                println!("Data directory: {:?}", data_dir);
+                println!("Status: Running");
+                return;
+            }
+            _ => {
+                println!("Unknown command. Use: backup, restore, export, import, or status");
+                return;
+            }
+        }
+    }
+
+    tracing::info!("Starting DivineLight server");
     tracing::info!("Data directory: {:?}", data_dir);
 
     let memory_store = MemoryStore::new(data_dir.clone())
