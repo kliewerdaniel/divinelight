@@ -1,0 +1,23 @@
+App Stack Overview
+
+- Vision: Desktop-focused, local-first implementation with a dedicated backend server and a rich frontend UI, all running locally without cloud dependencies.
+- Core technologies (proposed):
+  - Backend services: Rust (Actix-Web or Warp) or Go (Gin) for high-performance local services.
+  - Local storage: MemPalace verbatim store on disk (append-only), SQLite/ RocksDB for indices and graph data.
+  - Vector index: Lightweight local HNSW-based index (e.g., hnswlib bindings) with pluggable embeddings providers.
+  - Graph database: Embedded graph store (SQLite with adjacency tables or a small in-process graph library).
+  - Reasoning layer: Orchestrator module coordinating agents (Retriever, Verifier, Synthesizer, Contradiction Detector).
+  - Frontend: Electron-based desktop app or a local SPA served by the backend with a static build.
+  - Messaging: In-process event bus / message broker (lightweight pub-sub).
+  - Observability: Local logs, metrics endpoint, and optional file-based dashboards.
+  - Security: Local-only endpoints bound to localhost, restrictive file permissions, optional user authentication for multi-user setups.
+- Deployment model
+  - Single binary per component with a modular plugin system for agents.
+  - Data dir: /data/divinelight or user-provided path; ensure backups and integrity checks.
+- Data flows
+  - Ingestion writes to MemPalace; indices (embeddings, temporal, tags) updated.
+  - Retrieval queries read from MemPalace + indices; results feed reasoning agents.
+  - Reasoning orchestrator emits interpretations; belief-state updated and persisted.
+- Extensibility
+  - Agents implemented as plugins with a defined interface; new agents drop-in without core changes.
+  - Embedding providers pluggable; new models loaded via configuration.
