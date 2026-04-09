@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub struct GraphStore {
     db: Connection,
+    #[allow(dead_code)]
     data_dir: PathBuf,
 }
 
@@ -158,7 +159,7 @@ impl GraphStore {
     pub fn query_nodes(
         &self,
         node_type: Option<&str>,
-        label_contains: Option<&str>,
+        _label_contains: Option<&str>,
         limit: usize,
     ) -> Result<Vec<GraphNode>> {
         let mut sql = "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at FROM nodes WHERE 1=1".to_string();
@@ -266,13 +267,8 @@ impl GraphStore {
         ).map_err(|e| anyhow::anyhow!("Edge not found: {}", e))
     }
 
-    pub fn query_edges(
-        &self,
-        source: Option<&str>,
-        target: Option<&str>,
-        relation: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<GraphEdge>> {
+    #[allow(dead_code)]
+    pub fn query_edges(&self, limit: usize) -> Result<Vec<GraphEdge>> {
         let sql = "SELECT id, source, target, relation, properties, provenance, confidence, version, created_at, updated_at FROM edges ORDER BY created_at DESC LIMIT ?1";
         let mut stmt = self.db.prepare(sql)?;
         let edges: Vec<GraphEdge> = stmt
@@ -369,11 +365,10 @@ impl GraphStore {
 
             let neighbors = self.get_node_neighbors(&node_id, 100)?;
             for edge in neighbors {
-                let next_node = if edge.source == node_id {
-                    edge.target.clone()
-                } else {
-                    edge.source.clone()
-                };
+                if edge.source != node_id {
+                    continue;
+                }
+                let next_node = edge.target.clone();
                 if !visited.contains(&next_node) {
                     let mut new_path = path.clone();
                     new_path.push(next_node.clone());
@@ -385,6 +380,7 @@ impl GraphStore {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     pub fn has_cycle(&self, node_id: &str) -> Result<bool> {
         let mut visited = std::collections::HashSet::new();
         let mut recursion_stack = std::collections::HashSet::new();
@@ -422,6 +418,7 @@ impl GraphStore {
         Ok(dfs(self, node_id, &mut visited, &mut recursion_stack))
     }
 
+    #[allow(dead_code)]
     pub fn link_memory_to_graph(
         &self,
         memory_id: String,
@@ -454,6 +451,7 @@ impl GraphStore {
         })
     }
 
+    #[allow(dead_code)]
     pub fn get_memory_link(&self, memory_id: &str) -> Result<MemoryGraphLink> {
         self.db.query_row(
             "SELECT memory_id, linked_nodes, linked_edges, link_type, confidence, justification FROM memory_graph_links WHERE memory_id = ?1",

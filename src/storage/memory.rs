@@ -117,6 +117,7 @@ impl MemoryStore {
         Ok(memory)
     }
 
+    #[allow(dead_code)]
     pub fn query_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryObject>> {
         let mut stmt = self.db.prepare(
             "SELECT m.memory_id FROM memories m
@@ -140,6 +141,7 @@ impl MemoryStore {
         Ok(results)
     }
 
+    #[allow(dead_code)]
     pub fn query_by_source(&self, source: &str, limit: usize) -> Result<Vec<MemoryObject>> {
         let mut stmt = self.db.prepare(
             "SELECT memory_id FROM memories WHERE source = ?1 ORDER BY created_at DESC LIMIT ?2",

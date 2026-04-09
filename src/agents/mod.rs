@@ -1,4 +1,4 @@
-use crate::models::agent::{AgentOutput, AgentResult, AgentResultMetadata, GraphSubgraph};
+use crate::models::agent::{AgentOutput, AgentResult, AgentResultMetadata};
 use crate::models::memory::MemoryObject;
 use crate::retrieval::RetrievalResult;
 use anyhow::Result;
@@ -7,13 +7,15 @@ use uuid::Uuid;
 
 pub struct RetrieverAgent;
 
+#[allow(dead_code)]
 impl RetrieverAgent {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }
 
-    pub fn execute(&self, query: &str, results: Vec<RetrievalResult>) -> Result<AgentOutput> {
-        let task_id = format!("task_{}", Uuid::new_v4().to_string()[..8].to_string());
+    pub fn execute(&self, _query: &str, results: Vec<RetrievalResult>) -> Result<AgentOutput> {
+        let task_id = format!("task_{}", &Uuid::new_v4().to_string()[..8]);
 
         let outputs: Vec<AgentResult> = results
             .iter()
@@ -40,13 +42,15 @@ impl RetrieverAgent {
 
 pub struct VerifierAgent;
 
+#[allow(dead_code)]
 impl VerifierAgent {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }
 
     pub fn execute(&self, memories: Vec<&MemoryObject>) -> Result<AgentOutput> {
-        let task_id = format!("task_{}", Uuid::new_v4().to_string()[..8].to_string());
+        let task_id = format!("task_{}", &Uuid::new_v4().to_string()[..8]);
 
         let outputs: Vec<AgentResult> = memories
             .iter()
@@ -80,13 +84,15 @@ impl VerifierAgent {
 
 pub struct SynthesizerAgent;
 
+#[allow(dead_code)]
 impl SynthesizerAgent {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }
 
     pub fn execute(&self, results: Vec<RetrievalResult>) -> Result<AgentOutput> {
-        let task_id = format!("task_{}", Uuid::new_v4().to_string()[..8].to_string());
+        let task_id = format!("task_{}", &Uuid::new_v4().to_string()[..8]);
 
         let all_content: Vec<String> = results
             .iter()
@@ -131,13 +137,15 @@ impl SynthesizerAgent {
 
 pub struct ContradictionDetectorAgent;
 
+#[allow(dead_code)]
 impl ContradictionDetectorAgent {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }
 
     pub fn execute(&self, memories: Vec<&MemoryObject>) -> Result<AgentOutput> {
-        let task_id = format!("task_{}", Uuid::new_v4().to_string()[..8].to_string());
+        let task_id = format!("task_{}", &Uuid::new_v4().to_string()[..8]);
 
         let mut outputs = Vec::new();
         let contradictions = [

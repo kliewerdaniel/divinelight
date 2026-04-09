@@ -2,17 +2,34 @@ use axum::{
     Router,
     routing::{get, post},
     extract::{Path, Json, State},
-    response::Json as AxumJson,
+    response::{Json as AxumJson, Response},
 };
+use axum::http::Method;
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::storage::{MemoryStore, GraphStore};
 use crate::retrieval::{RetrievalEngine, RetrievalResult};
 use crate::reasoning::{ReasoningEngine, InterpretResponse};
 use crate::agents::{RetrieverAgent, VerifierAgent, SynthesizerAgent, ContradictionDetectorAgent};
 use crate::models::{MemoryObject, GraphNode, GraphEdge, GraphMetadata, AgentOutput, BeliefState};
+
+pub struct AppError(anyhow::Error);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", self.0)).into_response()
+    }
+}
+
+impl<E: Into<anyhow::Error>> From<E> for AppError {
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
+}
 
 pub struct AppState {
     pub memory: Mutex<MemoryStore>,
@@ -36,10 +53,16 @@ pub struct IngestRequest {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any);
+
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/memory/ingest", post(ingest_memory))
         .route("/api/v1/memory/:memory_id", get(get_memory))
+        .route("/api/v1/memory/list", get(list_memories))
         .route("/api/v1/graph/nodes", post(create_node))
         .route("/api/v1/graph/nodes/:node_id", get(get_node))
         .route("/api/v1/graph/edges", post(create_edge))
@@ -60,22 +83,31 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/backup/export", post(export_data))
         .route("/api/v1/backup/import", post(import_data))
         .with_state(state)
+        .layer(cors)
 }
 
-async fn health() -> &'static str {
-    "OK"
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    status: String,
+    version: String,
+}
+
+async fn health() -> AxumJson<HealthResponse> {
+    AxumJson(HealthResponse {
+        status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
 }
 
 async fn ingest_memory(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
-) -> Result<AxumJson<IngestResponse>, String> {
-    let mut memory = state.memory.lock().map_err(|e| e.to_string())?;
-    let result = memory.ingest(req.source.clone(), req.format, req.content.clone(), req.tags.clone())
-        .map_err(|e| e.to_string())?;
+) -> Result<AxumJson<IngestResponse>, AppError> {
+    let mut memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let result = memory.ingest(req.source.clone(), req.format, req.content.clone(), req.tags.clone())?;
     
-    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
-    retrieval.index_memory(&result).map_err(|e| e.to_string())?;
+    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    retrieval.index_memory(&result)?;
     
     Ok(AxumJson(IngestResponse {
         memory_id: result.memory_id,
@@ -86,10 +118,34 @@ async fn ingest_memory(
 async fn get_memory(
     State(state): State<Arc<AppState>>,
     Path(memory_id): Path<String>,
-) -> Result<AxumJson<MemoryObject>, String> {
-    let memory = state.memory.lock().map_err(|e| e.to_string())?;
-    let result = memory.get(&memory_id).map_err(|e| e.to_string())?;
+) -> Result<AxumJson<MemoryObject>, AppError> {
+    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let result = memory.get(&memory_id)?;
     Ok(AxumJson(result))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMemoriesQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListMemoriesResponse {
+    memories: Vec<MemoryObject>,
+    total: u64,
+}
+
+async fn list_memories(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
+) -> Result<AxumJson<ListMemoriesResponse>, AppError> {
+    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let limit = params.limit.unwrap_or(50);
+    let offset = params.offset.unwrap_or(0);
+    let memories = memory.list_all(limit, offset)?;
+    let total = memory.count()?;
+    Ok(AxumJson(ListMemoriesResponse { memories, total }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,19 +159,18 @@ pub struct CreateNodeRequest {
 async fn create_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateNodeRequest>,
-) -> Result<AxumJson<GraphNode>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let node = graph.create_node(req.node_type, req.label, req.properties, req.provenance)
-        .map_err(|e| e.to_string())?;
+) -> Result<AxumJson<GraphNode>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let node = graph.create_node(req.node_type, req.label, req.properties, req.provenance)?;
     Ok(AxumJson(node))
 }
 
 async fn get_node(
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
-) -> Result<AxumJson<GraphNode>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let node = graph.get_node(&node_id).map_err(|e| e.to_string())?;
+) -> Result<AxumJson<GraphNode>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let node = graph.get_node(&node_id)?;
     Ok(AxumJson(node))
 }
 
@@ -132,31 +187,31 @@ pub struct CreateEdgeRequest {
 async fn create_edge(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateEdgeRequest>,
-) -> Result<AxumJson<GraphEdge>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let edge = graph.create_edge(req.source, req.target, req.relation, req.properties, req.provenance, req.confidence)
-        .map_err(|e| e.to_string())?;
+) -> Result<AxumJson<GraphEdge>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let edge = graph.create_edge(req.source, req.target, req.relation, req.properties, req.provenance, req.confidence)?;
     Ok(AxumJson(edge))
 }
 
 async fn get_edge(
     State(state): State<Arc<AppState>>,
     Path(edge_id): Path<String>,
-) -> Result<AxumJson<GraphEdge>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let edge = graph.get_edge(&edge_id).map_err(|e| e.to_string())?;
+) -> Result<AxumJson<GraphEdge>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let edge = graph.get_edge(&edge_id)?;
     Ok(AxumJson(edge))
 }
 
 async fn get_graph_metadata(
     State(state): State<Arc<AppState>>,
-) -> Result<AxumJson<GraphMetadata>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let metadata = graph.get_metadata().map_err(|e| e.to_string())?;
+) -> Result<AxumJson<GraphMetadata>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let metadata = graph.get_metadata()?;
     Ok(AxumJson(metadata))
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct TraverseRequest {
     pub start_node_id: Option<String>,
     pub depth: Option<usize>,
@@ -172,15 +227,15 @@ pub struct TraverseResponse {
 async fn traverse_graph(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TraverseRequest>,
-) -> Result<AxumJson<TraverseResponse>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+) -> Result<AxumJson<TraverseResponse>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     let depth = req.depth.unwrap_or(3);
     let start_node_id = req.start_node_id.unwrap_or_default();
     
     let nodes = if !start_node_id.is_empty() {
-        graph.traverse_bfs(&start_node_id, depth).map_err(|e| e.to_string())?
+        graph.traverse_bfs(&start_node_id, depth)?
     } else {
-        graph.query_nodes(None, None, 100).map_err(|e| e.to_string())?
+        graph.query_nodes(None, None, 100)?
     };
     
     let edges: Vec<GraphEdge> = nodes.iter()
@@ -205,14 +260,15 @@ pub struct FindPathResponse {
 async fn find_path(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FindPathRequest>,
-) -> Result<AxumJson<FindPathResponse>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+) -> Result<AxumJson<FindPathResponse>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     let max_depth = req.max_depth.unwrap_or(5);
-    let path = graph.find_path(&req.start_id, &req.end_id, max_depth).map_err(|e| e.to_string())?;
+    let path = graph.find_path(&req.start_id, &req.end_id, max_depth)?;
     Ok(AxumJson(FindPathResponse { path }))
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct RetrieveRequest {
     pub query: String,
     pub modes: Option<Vec<String>>,
@@ -227,14 +283,15 @@ pub struct RetrieveResponse {
 async fn retrieve(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetrieveRequest>,
-) -> Result<AxumJson<RetrieveResponse>, String> {
-    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
+) -> Result<AxumJson<RetrieveResponse>, AppError> {
+    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     let limit = req.limit.unwrap_or(10);
-    let results = retrieval.search(&req.query, limit).map_err(|e| e.to_string())?;
+    let results = retrieval.search(&req.query, limit)?;
     Ok(AxumJson(RetrieveResponse { results }))
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct InterpretRequest {
     pub query: String,
     pub context_ids: Option<Vec<String>>,
@@ -243,20 +300,20 @@ pub struct InterpretRequest {
 async fn interpret(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InterpretRequest>,
-) -> Result<AxumJson<InterpretResponse>, String> {
-    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
-    let results = retrieval.search(&req.query, 10).map_err(|e| e.to_string())?;
+) -> Result<AxumJson<InterpretResponse>, AppError> {
+    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let results = retrieval.search(&req.query, 10)?;
     
-    let reasoning = state.reasoning.lock().map_err(|e| e.to_string())?;
-    let response = reasoning.interpret(&req.query, results).map_err(|e| e.to_string())?;
+    let reasoning = state.reasoning.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let response = reasoning.interpret(&req.query, results)?;
     
     Ok(AxumJson(response))
 }
 
 async fn get_belief(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Path(_belief_id): Path<String>,
-) -> Result<AxumJson<BeliefState>, String> {
+) -> Result<AxumJson<BeliefState>, AppError> {
     Ok(AxumJson(BeliefState {
         belief_id: _belief_id,
         timestamp: chrono::Utc::now(),
@@ -279,8 +336,8 @@ pub struct DetectConflictsResponse {
 async fn detect_conflicts(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DetectConflictsRequest>,
-) -> Result<AxumJson<DetectConflictsResponse>, String> {
-    let memory = state.memory.lock().map_err(|e| e.to_string())?;
+) -> Result<AxumJson<DetectConflictsResponse>, AppError> {
+    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     let mut memories = Vec::new();
     
     for id in &req.memory_ids {
@@ -290,7 +347,7 @@ async fn detect_conflicts(
     }
     
     let detector = ContradictionDetectorAgent::new();
-    let agent_output = detector.execute(memories.iter().collect()).map_err(|e| e.to_string())?;
+    let agent_output = detector.execute(memories.iter().collect())?;
     
     let conflicts: Vec<String> = agent_output.outputs.iter()
         .filter(|o| o.score > 0.0)
@@ -303,12 +360,12 @@ async fn detect_conflicts(
 async fn run_retriever(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetrieveRequest>,
-) -> Result<AxumJson<AgentOutput>, String> {
-    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
-    let results = retrieval.search(&req.query, req.limit.unwrap_or(10)).map_err(|e| e.to_string())?;
+) -> Result<AxumJson<AgentOutput>, AppError> {
+    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let results = retrieval.search(&req.query, req.limit.unwrap_or(10))?;
     
     let agent = RetrieverAgent::new();
-    let output = agent.execute(&req.query, results).map_err(|e| e.to_string())?;
+    let output = agent.execute(&req.query, results)?;
     
     Ok(AxumJson(output))
 }
@@ -316,8 +373,8 @@ async fn run_retriever(
 async fn run_verifier(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DetectConflictsRequest>,
-) -> Result<AxumJson<AgentOutput>, String> {
-    let memory = state.memory.lock().map_err(|e| e.to_string())?;
+) -> Result<AxumJson<AgentOutput>, AppError> {
+    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     let mut memories = Vec::new();
     
     for id in &req.memory_ids {
@@ -327,7 +384,7 @@ async fn run_verifier(
     }
     
     let agent = VerifierAgent::new();
-    let output = agent.execute(memories.iter().collect()).map_err(|e| e.to_string())?;
+    let output = agent.execute(memories.iter().collect())?;
     
     Ok(AxumJson(output))
 }
@@ -335,12 +392,12 @@ async fn run_verifier(
 async fn run_synthesizer(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetrieveRequest>,
-) -> Result<AxumJson<AgentOutput>, String> {
-    let retrieval = state.retrieval.lock().map_err(|e| e.to_string())?;
-    let results = retrieval.search(&req.query, req.limit.unwrap_or(10)).map_err(|e| e.to_string())?;
+) -> Result<AxumJson<AgentOutput>, AppError> {
+    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let results = retrieval.search(&req.query, req.limit.unwrap_or(10))?;
     
     let agent = SynthesizerAgent::new();
-    let output = agent.execute(results).map_err(|e| e.to_string())?;
+    let output = agent.execute(results)?;
     
     Ok(AxumJson(output))
 }
@@ -348,8 +405,8 @@ async fn run_synthesizer(
 async fn run_contradiction_detector(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DetectConflictsRequest>,
-) -> Result<AxumJson<AgentOutput>, String> {
-    let memory = state.memory.lock().map_err(|e| e.to_string())?;
+) -> Result<AxumJson<AgentOutput>, AppError> {
+    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     let mut memories = Vec::new();
     
     for id in &req.memory_ids {
@@ -359,7 +416,7 @@ async fn run_contradiction_detector(
     }
     
     let agent = ContradictionDetectorAgent::new();
-    let output = agent.execute(memories.iter().collect()).map_err(|e| e.to_string())?;
+    let output = agent.execute(memories.iter().collect())?;
     
     Ok(AxumJson(output))
 }
@@ -378,9 +435,9 @@ pub struct BackupResponse {
 }
 
 async fn create_backup(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
-) -> Result<AxumJson<BackupResponse>, String> {
+) -> Result<AxumJson<BackupResponse>, AppError> {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("divinelight");
@@ -388,19 +445,17 @@ async fn create_backup(
     let backup_path = std::path::PathBuf::from(&req.path);
     let manager = BackupManager::new(data_dir);
     
-    match manager.create_backup(&backup_path) {
-        Ok(manifest) => Ok(AxumJson(BackupResponse {
-            status: "success".to_string(),
-            manifest: Some(manifest),
-        })),
-        Err(e) => Err(e.to_string())
-    }
+    let manifest = manager.create_backup(&backup_path)?;
+    Ok(AxumJson(BackupResponse {
+        status: "success".to_string(),
+        manifest: Some(manifest),
+    }))
 }
 
 async fn restore_backup(
     State(_state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
-) -> Result<AxumJson<BackupResponse>, String> {
+) -> Result<AxumJson<BackupResponse>, AppError> {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("divinelight");
@@ -408,19 +463,17 @@ async fn restore_backup(
     let backup_path = std::path::PathBuf::from(&req.path);
     let manager = BackupManager::new(data_dir);
     
-    match manager.restore_backup(&backup_path) {
-        Ok(_) => Ok(AxumJson(BackupResponse {
-            status: "success".to_string(),
-            manifest: None,
-        })),
-        Err(e) => Err(e.to_string())
-    }
+    manager.restore_backup(&backup_path)?;
+    Ok(AxumJson(BackupResponse {
+        status: "success".to_string(),
+        manifest: None,
+    }))
 }
 
 async fn export_data(
     State(_state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
-) -> Result<AxumJson<BackupResponse>, String> {
+) -> Result<AxumJson<BackupResponse>, AppError> {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("divinelight");
@@ -428,19 +481,17 @@ async fn export_data(
     let export_path = std::path::PathBuf::from(&req.path);
     let manager = BackupManager::new(data_dir);
     
-    match manager.export_data(&export_path) {
-        Ok(_) => Ok(AxumJson(BackupResponse {
-            status: "success".to_string(),
-            manifest: None,
-        })),
-        Err(e) => Err(e.to_string())
-    }
+    manager.export_data(&export_path)?;
+    Ok(AxumJson(BackupResponse {
+        status: "success".to_string(),
+        manifest: None,
+    }))
 }
 
 async fn import_data(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
-) -> Result<AxumJson<BackupResponse>, String> {
+) -> Result<AxumJson<BackupResponse>, AppError> {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("divinelight");
@@ -448,11 +499,9 @@ async fn import_data(
     let import_path = std::path::PathBuf::from(&req.path);
     let manager = BackupManager::new(data_dir);
     
-    match manager.import_data(&import_path) {
-        Ok(count) => Ok(AxumJson(BackupResponse {
-            status: format!("Imported {} memories", count),
-            manifest: None,
-        })),
-        Err(e) => Err(e.to_string())
-    }
+    let count = manager.import_data(&import_path)?;
+    Ok(AxumJson(BackupResponse {
+        status: format!("Imported {} memories", count),
+        manifest: None,
+    }))
 }

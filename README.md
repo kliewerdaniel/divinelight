@@ -1,103 +1,97 @@
 # DivineLight
 
-A unified AI memory system combining MemPalace verbatim storage, Graphify knowledge graphs, and Synt-inspired reasoning agents.
+A local-first, unified AI memory system combining verbatim cold storage (MemPalace), structured knowledge graphs (Graphify), and graph-aware reasoning agents (Synt-inspired).
 
-## Overview
-
-DivineLight is a local-first, production-grade memory system that integrates:
-- **MemPalace**: Verbatim cold storage for raw memory without summarization
-- **Graphify**: Knowledge graph construction and structured reasoning
-- **Synt Agents**: Graph-aware reasoning, evaluation, and belief-state management
-
-## Features
-
-### Core Capabilities
-- **Memory Ingestion**: Store verbatim memories with SHA256 integrity checks
-- **Knowledge Graph**: Entity extraction, relationship discovery, BFS/DFS traversal
-- **Hybrid Retrieval**: Keyword search with relevance scoring
-- **Reasoning Layer**: Belief-state management and interpretation
-- **Agent System**: Retriever, Verifier, Synthesizer, Contradiction Detector agents
-
-### API Endpoints
-- Memory: `POST /api/v1/memory/ingest`, `GET /api/v1/memory/:id`
-- Graph: `POST /api/v1/graph/nodes`, `POST /api/v1/graph/edges`, `POST /api/v1/graph/traverse`, `POST /api/v1/graph/path`
-- Retrieval: `POST /api/v1/retrieve`
-- Reasoning: `POST /api/v1/reason/interpret`, `GET /api/v1/reason/beliefs/:id`
-- Agents: `/api/v1/agents/retriever|verifier|synthesizer|contradiction`
-- Backup: `POST /api/v1/backup/create|restore|export|import`
-
-### CLI Commands
-```bash
-cargo run              # Start server on http://127.0.0.1:8080
-cargo run -- backup <path>    # Create backup
-cargo run -- restore <path>  # Restore from backup
-cargo run -- export <path>   # Export data
-cargo run -- import <path>   # Import data
-cargo run -- status          # Check status
-```
-
-### Testing
-```bash
-cargo test              # Run all tests
-```
-
-## Installation
+## Quickstart
 
 ### Prerequisites
 - Rust 1.70+
-- SQLite (bundled via rusqlite)
+- No external database required (SQLite is bundled)
 
-### Build
-```bash
-cargo build --release
-```
-
-### Run
+### Run the server
 ```bash
 cargo run
 ```
 
-The server starts on `http://127.0.0.1:8080`
+Server starts at `http://127.0.0.1:8080`. Open `frontend/index.html` in a browser.
 
-## Configuration
+### Configuration
+Copy `.env.example` to `.env` and adjust values:
+```bash
+cp .env.example .env
+```
+Environment variables:
+| Variable | Default | Description |
+|---|---|---|
+| `DIVINELIGHT_DATA_DIR` | Platform data dir | Where memories and databases are stored |
+| `DIVINELIGHT_HOST` | `127.0.0.1` | Server bind host |
+| `DIVINELIGHT_PORT` | `8080` | Server port |
+| `RUST_LOG` | `divinelight=info` | Log level |
 
-Data is stored in `~/Library/Application Support/divinelight/`:
-- `memories/` - JSON memory files
-- `divinelight.db` - Memory metadata
-- `graph.db` - Knowledge graph
-- `retrieval.db` - Search index
+### CLI Operations
+```bash
+cargo run -- backup  <path>   # Create backup
+cargo run -- restore <path>   # Restore from backup
+cargo run -- export  <path>   # Export memories to JSONL
+cargo run -- import  <path>   # Import memories from JSONL
+cargo run -- status           # Show data directory status
+```
+
+### Tests
+```bash
+cargo test
+```
 
 ## Architecture
 
 ```
-┌──────────────┐     ┌─────────────┐     ┌──────────────┐
-│  Ingestion   │────▶│  MemPalace  │────▶│  Retrieval   │
-│   Layer       │     │  (Storage)  │     │   Layer      │
-└──────────────┘     └─────────────┘     └──────────────┘
-                                               │
-                                               ▼
-┌──────────────┐     ┌─────────────┐     ┌──────────────┐
-│   Graph      │◀────│   Graphify  │◀────│   Reasoning  │
-│   Storage    │     │  (Extract)  │     │    Layer     │
-└──────────────┘     └─────────────┘     └──────────────┘
-                                               │
-                                               ▼
-                                    ┌──────────────────┐
-                                    │    Agents        │
-                                    │ - Retriever      │
-                                    │ - Verifier       │
-                                    │ - Synthesizer    │
-                                    │ - Contradiction  │
-                                    └──────────────────┘
+Ingestion ──▶ MemoryStore ──▶ RetrievalEngine
+                                    │
+              GraphStore ◀──────────┤
+                                    │
+              ReasoningEngine ◀─────┘
+                    │
+              Agents (Retriever, Verifier, Synthesizer, ContradictionDetector)
+                    │
+              REST API (Axum) ──▶ Frontend (HTML)
 ```
 
-## Tech Stack
+See `docs/architecture_overview.md` for full architecture diagrams.
 
-- **Backend**: Rust with Axum web framework
-- **Storage**: SQLite (rusqlite)
-- **API**: RESTful JSON over HTTP
-- **Frontend**: Web UI (frontend/index.html)
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | System health check |
+| POST | `/api/v1/memory/ingest` | Store a new memory |
+| GET | `/api/v1/memory/:id` | Retrieve a memory by ID |
+| GET | `/api/v1/memory/list` | List all memories (paginated) |
+| POST | `/api/v1/graph/nodes` | Create a graph node |
+| GET | `/api/v1/graph/nodes/:id` | Get a graph node |
+| POST | `/api/v1/graph/edges` | Create a graph edge |
+| GET | `/api/v1/graph/edges/:id` | Get a graph edge |
+| GET | `/api/v1/graph/metadata` | Graph statistics |
+| POST | `/api/v1/graph/traverse` | BFS/DFS traversal |
+| POST | `/api/v1/graph/path` | Find path between nodes |
+| POST | `/api/v1/retrieve` | Hybrid search |
+| POST | `/api/v1/reason/interpret` | Run reasoning pipeline |
+| GET | `/api/v1/reason/beliefs/:id` | Get belief state |
+| POST | `/api/v1/agents/retriever` | Run retriever agent |
+| POST | `/api/v1/agents/verifier` | Run verifier agent |
+| POST | `/api/v1/agents/synthesizer` | Run synthesizer agent |
+| POST | `/api/v1/agents/contradiction` | Run contradiction detector |
+| POST | `/api/v1/backup/create` | Create backup |
+| POST | `/api/v1/backup/restore` | Restore backup |
+| POST | `/api/v1/backup/export` | Export data |
+| POST | `/api/v1/backup/import` | Import data |
+
+## Data Storage
+
+All data is stored locally in `DIVINELIGHT_DATA_DIR`:
+- `memories/*.json` — verbatim memory files (append-only)
+- `divinelight.db` — memory metadata index (SQLite)
+- `graph.db` — knowledge graph nodes and edges (SQLite)
+- `retrieval.db` — keyword search index (SQLite)
 
 ## License
-
 MIT

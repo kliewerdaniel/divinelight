@@ -21,6 +21,7 @@ pub struct InterpretResponse {
 }
 
 impl ReasoningEngine {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }
@@ -30,7 +31,7 @@ impl ReasoningEngine {
         query: &str,
         retrieval_results: Vec<RetrievalResult>,
     ) -> Result<InterpretResponse> {
-        let belief_id = format!("belief_{}", Uuid::new_v4().to_string()[..8].to_string());
+        let belief_id = format!("belief_{}", &Uuid::new_v4().to_string()[..8]);
 
         let interpretations = self.generate_interpretations(query, &retrieval_results);
 
@@ -58,7 +59,7 @@ impl ReasoningEngine {
 
     fn generate_interpretations(
         &self,
-        query: &str,
+        _query: &str,
         results: &[RetrievalResult],
     ) -> Vec<Interpretation> {
         let mut interpretations = Vec::new();
@@ -78,7 +79,7 @@ impl ReasoningEngine {
         };
 
         let interpretation = Interpretation {
-            interpretation_id: format!("interp_{}", Uuid::new_v4().to_string()[..8].to_string()),
+            interpretation_id: format!("interp_{}", &Uuid::new_v4().to_string()[..8]),
             summary,
             confidence: top_result.confidence,
             supporting_memory_ids: results
@@ -145,6 +146,7 @@ impl ReasoningEngine {
         false
     }
 
+    #[allow(dead_code)]
     pub fn create_graph_query_agent(&self) -> GraphQueryAgent {
         GraphQueryAgent::new()
     }
@@ -152,7 +154,9 @@ impl ReasoningEngine {
 
 pub struct GraphQueryAgent;
 
+#[allow(dead_code)]
 impl GraphQueryAgent {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }
@@ -163,7 +167,7 @@ impl GraphQueryAgent {
         graph_nodes: &[crate::models::graph::GraphNode],
         graph_edges: &[crate::models::graph::GraphEdge],
     ) -> Result<AgentOutput> {
-        let task_id = format!("task_{}", Uuid::new_v4().to_string()[..8].to_string());
+        let task_id = format!("task_{}", &Uuid::new_v4().to_string()[..8]);
 
         let relevant_nodes: Vec<_> = graph_nodes
             .iter()

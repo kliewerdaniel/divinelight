@@ -123,6 +123,10 @@ impl RetrievalEngine {
     }
 
     fn calculate_score(&self, query: &str, content: &str, tags: &str) -> f64 {
+        if query == "*" || query.trim().is_empty() {
+            return 0.5;
+        }
+
         let query_terms: Vec<&str> = query.split_whitespace().collect();
         let mut score = 0.0;
 
@@ -137,7 +141,7 @@ impl RetrievalEngine {
 
         if score > 0.0 {
             let content_len = content.split_whitespace().count() as f64;
-            score + (1.0 / (1.0 + (content_len / 100.0).ln()))
+            score + (1.0 / (1.0 + (content_len / 100.0 + 1.0).ln()))
         } else {
             0.0
         }

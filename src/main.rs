@@ -1,7 +1,5 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use axum::Router;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -12,7 +10,9 @@ mod retrieval;
 mod reasoning;
 mod agents;
 mod backup;
+mod config;
 
+use config::Config;
 use api::{AppState, create_router};
 use storage::{MemoryStore, GraphStore};
 use retrieval::RetrievalEngine;
@@ -21,17 +21,15 @@ use crate::backup::BackupManager;
 
 #[tokio::main]
 async fn main() {
+    let config = Config::from_env();
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "divinelight=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| config.log_level.clone().into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("divinelight");
 
     let args: Vec<String> = std::env::args().collect();
     
@@ -39,7 +37,7 @@ async fn main() {
         match args[1].as_str() {
             "backup" => {
                 if let Some(path) = args.get(2) {
-                    let manager = BackupManager::new(data_dir.clone());
+                    let manager = BackupManager::new(config.data_dir.clone());
                     match manager.create_backup(&std::path::PathBuf::from(path)) {
                         Ok(manifest) => {
                             println!("Backup created successfully!");
@@ -55,7 +53,7 @@ async fn main() {
             }
             "restore" => {
                 if let Some(path) = args.get(2) {
-                    let manager = BackupManager::new(data_dir.clone());
+                    let manager = BackupManager::new(config.data_dir.clone());
                     match manager.restore_backup(&std::path::PathBuf::from(path)) {
                         Ok(_) => println!("Restore completed successfully!"),
                         Err(e) => println!("Restore failed: {}", e),
@@ -67,7 +65,7 @@ async fn main() {
             }
             "export" => {
                 if let Some(path) = args.get(2) {
-                    let manager = BackupManager::new(data_dir.clone());
+                    let manager = BackupManager::new(config.data_dir.clone());
                     match manager.export_data(&std::path::PathBuf::from(path)) {
                         Ok(_) => println!("Export completed successfully!"),
                         Err(e) => println!("Export failed: {}", e),
@@ -79,7 +77,7 @@ async fn main() {
             }
             "import" => {
                 if let Some(path) = args.get(2) {
-                    let manager = BackupManager::new(data_dir.clone());
+                    let manager = BackupManager::new(config.data_dir.clone());
                     match manager.import_data(&std::path::PathBuf::from(path)) {
                         Ok(count) => println!("Imported {} memories", count),
                         Err(e) => println!("Import failed: {}", e),
@@ -90,8 +88,8 @@ async fn main() {
                 return;
             }
             "status" => {
-                let manager = BackupManager::new(data_dir.clone());
-                println!("Data directory: {:?}", data_dir);
+                let _manager = BackupManager::new(config.data_dir.clone());
+                println!("Data directory: {:?}", config.data_dir);
                 println!("Status: Running");
                 return;
             }
@@ -103,13 +101,13 @@ async fn main() {
     }
 
     tracing::info!("Starting DivineLight server");
-    tracing::info!("Data directory: {:?}", data_dir);
+    tracing::info!("Data directory: {:?}", config.data_dir);
 
-    let memory_store = MemoryStore::new(data_dir.clone())
+    let memory_store = MemoryStore::new(config.data_dir.clone())
         .expect("Failed to initialize memory store");
-    let graph_store = GraphStore::new(data_dir.clone())
+    let graph_store = GraphStore::new(config.data_dir.clone())
         .expect("Failed to initialize graph store");
-    let retrieval_engine = RetrievalEngine::new(data_dir.clone())
+    let retrieval_engine = RetrievalEngine::new(config.data_dir.clone())
         .expect("Failed to initialize retrieval engine");
     let reasoning_engine = ReasoningEngine::new();
 
@@ -122,7 +120,7 @@ async fn main() {
 
     let app = create_router(state).layer(TraceLayer::new_for_http());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let addr = config.socket_addr();
     tracing::info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

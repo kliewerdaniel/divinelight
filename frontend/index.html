@@ -193,13 +193,16 @@
         async function refreshStats() {
             try {
                 const meta = await call('/api/v1/graph/metadata');
-                document.getElementById('nodeCount').textContent = meta.node_count || 0;
-                document.getElementById('edgeCount').textContent = meta.edge_count || 0;
-                
-                const retrieval = await call('/api/v1/retrieve', { method: 'POST', body: JSON.stringify({ query: '*', limit: 1000 }) });
-                document.getElementById('memCount').textContent = retrieval.results?.length || 0;
-                
-                document.getElementById('systemResult').innerHTML = '<div class="result-item">System healthy</div>';
+                document.getElementById('nodeCount').textContent = meta.node_count ?? 0;
+                document.getElementById('edgeCount').textContent = meta.edge_count ?? 0;
+
+                const list = await call('/api/v1/memory/list?limit=1');
+                document.getElementById('memCount').textContent = list.total ?? 0;
+
+                document.getElementById('beliefCount').textContent = '—';
+
+                document.getElementById('systemResult').innerHTML =
+                    '<div class="result-item">System healthy ✓</div>';
             } catch (e) {
                 showError('systemResult', e.message);
             }

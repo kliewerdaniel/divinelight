@@ -163,4 +163,263 @@ mod tests {
         assert_eq!(belief.conflict_flags.len(), 1);
         assert_eq!(belief.state, "open");
     }
+
+    #[test]
+    fn test_memory_store_ingest_and_get() {
+        let dir = TempDir::new().unwrap();
+        let mut store = crate::storage::MemoryStore::new(dir.path().to_path_buf()).unwrap();
+
+        let memory = store
+            .ingest(
+                "test_source".to_string(),
+                "plaintext".to_string(),
+                "Hello world".to_string(),
+                vec!["test".to_string()],
+            )
+            .unwrap();
+
+        let retrieved = store.get(&memory.memory_id).unwrap();
+        assert_eq!(retrieved.content, "Hello world");
+        assert_eq!(retrieved.source, "test_source");
+        assert!(retrieved.verify());
+    }
+
+    #[test]
+    fn test_memory_store_count() {
+        let dir = TempDir::new().unwrap();
+        let mut store = crate::storage::MemoryStore::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(store.count().unwrap(), 0);
+
+        store
+            .ingest("s".to_string(), "p".to_string(), "c1".to_string(), vec![])
+            .unwrap();
+        store
+            .ingest("s".to_string(), "p".to_string(), "c2".to_string(), vec![])
+            .unwrap();
+
+        assert_eq!(store.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_graph_store_create_node_and_edge() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+
+        let node_a = store
+            .create_node(
+                "Person".to_string(),
+                "Alice".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+
+        let node_b = store
+            .create_node(
+                "Person".to_string(),
+                "Bob".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+
+        let edge = store
+            .create_edge(
+                node_a.id.clone(),
+                node_b.id.clone(),
+                "knows".to_string(),
+                serde_json::json!({}),
+                vec![],
+                0.9,
+            )
+            .unwrap();
+
+        assert_eq!(edge.source, node_a.id);
+        assert_eq!(edge.target, node_b.id);
+
+        let meta = store.get_metadata().unwrap();
+        assert_eq!(meta.node_count, 2);
+        assert_eq!(meta.edge_count, 1);
+    }
+
+    #[test]
+    fn test_graph_store_bfs_traversal() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+
+        let a = store
+            .create_node(
+                "T".to_string(),
+                "A".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        let b = store
+            .create_node(
+                "T".to_string(),
+                "B".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        let c = store
+            .create_node(
+                "T".to_string(),
+                "C".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+
+        store
+            .create_edge(
+                a.id.clone(),
+                b.id.clone(),
+                "r".to_string(),
+                serde_json::json!({}),
+                vec![],
+                1.0,
+            )
+            .unwrap();
+        store
+            .create_edge(
+                b.id.clone(),
+                c.id.clone(),
+                "r".to_string(),
+                serde_json::json!({}),
+                vec![],
+                1.0,
+            )
+            .unwrap();
+
+        let traversed = store.traverse_bfs(&a.id, 2).unwrap();
+        assert!(traversed.len() >= 3);
+    }
+
+    #[test]
+    fn test_graph_store_find_path() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+
+        let a = store
+            .create_node(
+                "T".to_string(),
+                "A".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        let b = store
+            .create_node(
+                "T".to_string(),
+                "B".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+
+        store
+            .create_edge(
+                a.id.clone(),
+                b.id.clone(),
+                "r".to_string(),
+                serde_json::json!({}),
+                vec![],
+                1.0,
+            )
+            .unwrap();
+
+        let path = store.find_path(&a.id, &b.id, 5).unwrap();
+        assert!(path.is_some());
+
+        let no_path = store.find_path(&b.id, &a.id, 5).unwrap();
+        assert!(no_path.is_none());
+    }
+
+    #[test]
+    fn test_retrieval_engine_indexing_and_search() {
+        let dir = TempDir::new().unwrap();
+        let engine = crate::retrieval::RetrievalEngine::new(dir.path().to_path_buf()).unwrap();
+
+        let memory = crate::models::MemoryObject::new(
+            "test".to_string(),
+            "plaintext".to_string(),
+            "The quick brown fox".to_string(),
+            vec!["animals".to_string()],
+        );
+
+        engine.index_memory(&memory).unwrap();
+
+        std::fs::create_dir_all(dir.path().join("memories")).unwrap();
+        let path = dir
+            .path()
+            .join("memories")
+            .join(format!("{}.json", memory.memory_id));
+        std::fs::write(&path, serde_json::to_string(&memory).unwrap()).unwrap();
+
+        let results = engine.search("fox", 10).unwrap();
+        assert!(!results.is_empty());
+        assert!(results[0].score > 0.0);
+    }
+
+    #[test]
+    fn test_retrieval_wildcard_returns_all() {
+        let dir = TempDir::new().unwrap();
+        let engine = crate::retrieval::RetrievalEngine::new(dir.path().to_path_buf()).unwrap();
+
+        let m1 = crate::models::MemoryObject::new(
+            "s".to_string(),
+            "p".to_string(),
+            "content one".to_string(),
+            vec![],
+        );
+        let m2 = crate::models::MemoryObject::new(
+            "s".to_string(),
+            "p".to_string(),
+            "content two".to_string(),
+            vec![],
+        );
+
+        for m in [&m1, &m2] {
+            engine.index_memory(m).unwrap();
+            std::fs::create_dir_all(dir.path().join("memories")).unwrap();
+            let path = dir
+                .path()
+                .join("memories")
+                .join(format!("{}.json", m.memory_id));
+            std::fs::write(&path, serde_json::to_string(m).unwrap()).unwrap();
+        }
+
+        let results = engine.search("*", 100).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_synthesizer_agent_empty_input() {
+        use crate::agents::SynthesizerAgent;
+        let agent = SynthesizerAgent::new();
+        let output = agent.execute(vec![]).unwrap();
+        assert_eq!(
+            output.outputs[0].metadata.explanation,
+            "No content to synthesize"
+        );
+    }
+
+    #[test]
+    fn test_verifier_agent_detects_tampered_memory() {
+        use crate::agents::VerifierAgent;
+        let mut memory = crate::models::MemoryObject::new(
+            "test".to_string(),
+            "plaintext".to_string(),
+            "Original content".to_string(),
+            vec![],
+        );
+        memory.content = "Tampered content".to_string();
+
+        let agent = VerifierAgent::new();
+        let output = agent.execute(vec![&memory]).unwrap();
+        assert_eq!(output.outputs[0].score, 0.0);
+        assert!(output.outputs[0].metadata.explanation.contains("failed"));
+    }
 }

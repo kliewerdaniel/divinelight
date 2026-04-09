@@ -1,11 +1,9 @@
 use crate::models::memory::MemoryObject;
-use crate::retrieval::RetrievalEngine;
-use crate::storage::{GraphStore, MemoryStore};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupManifest {
@@ -25,12 +23,12 @@ impl BackupManager {
         Self { data_dir }
     }
 
-    pub fn create_backup(&self, backup_path: &PathBuf) -> Result<BackupManifest> {
+    pub fn create_backup(&self, backup_path: &Path) -> Result<BackupManifest> {
         fs::create_dir_all(backup_path)?;
 
         let memory_manifest = self.backup_memories(backup_path)?;
         let graph_manifest = self.backup_graph(backup_path)?;
-        let retrieval_manifest = self.backup_retrieval(backup_path)?;
+        let _retrieval_manifest = self.backup_retrieval(backup_path)?;
 
         let manifest = BackupManifest {
             version: "1.0".to_string(),
@@ -48,7 +46,7 @@ impl BackupManager {
         Ok(manifest)
     }
 
-    fn backup_memories(&self, backup_path: &PathBuf) -> Result<u64> {
+    fn backup_memories(&self, backup_path: &Path) -> Result<u64> {
         let memories_dir = self.data_dir.join("memories");
         let backup_memories_dir = backup_path.join("memories");
         fs::create_dir_all(&backup_memories_dir)?;
@@ -57,7 +55,7 @@ impl BackupManager {
         if memories_dir.exists() {
             for entry in fs::read_dir(&memories_dir)? {
                 let entry = entry?;
-                if entry.path().extension().map_or(false, |e| e == "json") {
+                if entry.path().extension().is_some_and(|e| e == "json") {
                     fs::copy(entry.path(), backup_memories_dir.join(entry.file_name()))?;
                     count += 1;
                 }
@@ -66,7 +64,7 @@ impl BackupManager {
         Ok(count)
     }
 
-    fn backup_graph(&self, backup_path: &PathBuf) -> Result<(u64, u64)> {
+    fn backup_graph(&self, backup_path: &Path) -> Result<(u64, u64)> {
         let graph_db = self.data_dir.join("graph.db");
         let backup_db = backup_path.join("graph.db");
 
@@ -80,7 +78,7 @@ impl BackupManager {
         Ok((node_count, edge_count))
     }
 
-    fn backup_retrieval(&self, backup_path: &PathBuf) -> Result<u64> {
+    fn backup_retrieval(&self, backup_path: &Path) -> Result<u64> {
         let retrieval_db = self.data_dir.join("retrieval.db");
         let backup_db = backup_path.join("retrieval.db");
 
@@ -92,12 +90,15 @@ impl BackupManager {
         Ok(count)
     }
 
-    fn count_lines(&self, db_path: &PathBuf, _query: &str) -> Result<u64> {
-        let mut file = File::open(db_path)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-
-        Ok(if buffer.len() > 0 { 1 } else { 0 })
+    fn count_lines(&self, db_path: &Path, query: &str) -> Result<u64> {
+        if !db_path.exists() {
+            return Ok(0);
+        }
+        let conn = rusqlite::Connection::open(db_path)?;
+        match conn.query_row(query, [], |row| row.get::<_, i64>(0)) {
+            Ok(count) => Ok(count as u64),
+            Err(_) => Ok(0),
+        }
     }
 
     pub fn restore_backup(&self, backup_path: &PathBuf) -> Result<()> {
@@ -133,14 +134,14 @@ impl BackupManager {
         Ok(())
     }
 
-    pub fn export_data(&self, export_path: &PathBuf) -> Result<File> {
+    pub fn export_data(&self, export_path: &Path) -> Result<File> {
         let mut file = File::create(export_path)?;
 
         let memories_dir = self.data_dir.join("memories");
         if memories_dir.exists() {
             for entry in fs::read_dir(&memories_dir)? {
                 let entry = entry?;
-                if entry.path().extension().map_or(false, |e| e == "json") {
+                if entry.path().extension().is_some_and(|e| e == "json") {
                     let content = fs::read_to_string(entry.path())?;
                     writeln!(file, "{}", content)?;
                 }
@@ -150,7 +151,7 @@ impl BackupManager {
         Ok(file)
     }
 
-    pub fn import_data(&self, import_path: &PathBuf) -> Result<u64> {
+    pub fn import_data(&self, import_path: &Path) -> Result<u64> {
         let mut count = 0u64;
         let content = fs::read_to_string(import_path)?;
 

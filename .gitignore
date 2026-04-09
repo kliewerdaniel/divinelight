@@ -1,5 +1,5 @@
 /reference_repos/
-
+/blog/
 # Added by cargo
-
+.DS_Store
 /target
