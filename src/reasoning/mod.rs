@@ -106,19 +106,53 @@ impl ReasoningEngine {
         for i in 0..memories.len() {
             for j in (i + 1)..memories.len() {
                 if self.has_contradiction(&memories[i].content, &memories[j].content) {
-                    conflicts.push(ConflictFlag {
-                        conflict_type: "memory_vs_memory".to_string(),
-                        description: format!(
-                            "Potential contradiction between {} and {}",
-                            memories[i].memory_id, memories[j].memory_id
-                        ),
-                        affected_edges: vec![],
-                    });
+                    let similarity =
+                        self.calculate_similarity(&memories[i].content, &memories[j].content);
+
+                    if similarity > 0.3 {
+                        conflicts.push(ConflictFlag {
+                            conflict_type: "memory_vs_memory".to_string(),
+                            description: format!(
+                                "Potential contradiction between {} and {}",
+                                memories[i].memory_id, memories[j].memory_id
+                            ),
+                            affected_edges: vec![],
+                        });
+                    }
                 }
             }
         }
 
         conflicts
+    }
+
+    fn calculate_similarity(&self, content1: &str, content2: &str) -> f64 {
+        let words1: std::collections::HashSet<String> = content1
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| s.len() > 3)
+            .map(|s| s.to_string())
+            .collect();
+
+        let words2: std::collections::HashSet<String> = content2
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| s.len() > 3)
+            .map(|s| s.to_string())
+            .collect();
+
+        if words1.is_empty() || words2.is_empty() {
+            return 0.0;
+        }
+
+        let intersection: usize = words1.intersection(&words2).count();
+        let union = words1.union(&words2).count();
+
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f64 / union as f64
+        }
     }
 
     fn has_contradiction(&self, content1: &str, content2: &str) -> bool {

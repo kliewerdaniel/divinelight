@@ -93,5 +93,42 @@ All data is stored locally in `DIVINELIGHT_DATA_DIR`:
 - `graph.db` — knowledge graph nodes and edges (SQLite)
 - `retrieval.db` — keyword search index (SQLite)
 
+## API Request Examples
+
+### Ingest Memory
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/memory/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"source": "blog/post.md", "format": "markdown", "content": "...", "tags": ["blog"]}'
+```
+
+### Create Graph Node
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/graph/nodes \
+  -H "Content-Type: application/json" \
+  -d '{"node_type": "concept", "label": "AI", "properties": {"description": "Artificial Intelligence"}, "provenance": []}'
+```
+
+### Create Graph Edge
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/graph/edges \
+  -H "Content-Type: application/json" \
+  -d '{"source": "node-id-1", "target": "node-id-2", "relation": "related_to", "properties": {}, "provenance": [], "confidence": 1.0}'
+```
+
+### Graph Traverse
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/graph/traverse \
+  -H "Content-Type: application/json" \
+  -d '{"start_node_id": "node-id", "depth": 3}'
+```
+
+### Graph Path
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/graph/path \
+  -H "Content-Type: application/json" \
+  -d '{"start_id": "node-id-1", "end_id": "node-id-2", "max_depth": 5}'
+```
+
 ## License
 MIT

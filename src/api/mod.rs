@@ -109,6 +109,9 @@ async fn ingest_memory(
     let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     retrieval.index_memory(&result)?;
     
+    let mut graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    extract_and_create_graph_nodes(&mut graph, &result)?;
+    
     Ok(AxumJson(IngestResponse {
         memory_id: result.memory_id,
         status: "created".to_string(),
@@ -505,3 +508,100 @@ async fn import_data(
         manifest: None,
     }))
 }
+
+fn extract_and_create_graph_nodes(graph: &mut GraphStore, memory: &MemoryObject) -> Result<(), AppError> {
+    let content = &memory.content;
+    
+    let mentioned_concepts: Vec<String> = Vec::new();
+    
+    let significant_words: Vec<&str> = content.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| {
+            let w = word.to_lowercase();
+            w.len() > 4 && !STOP_WORDS.contains(&w.as_str())
+        })
+        .collect();
+    
+    let mut word_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for word in significant_words {
+        let lower = word.to_lowercase();
+        *word_freq.entry(lower).or_insert(0) += 1;
+    }
+    
+    let top_words: Vec<String> = word_freq.iter()
+        .filter(|(_, count)| **count >= 2)
+        .map(|(w, _)| w.clone())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .take(10)
+        .collect();
+    
+    for concept in top_words {
+        let label = concept.clone();
+        let properties = serde_json::json!({
+            "source": "auto_extracted",
+            "memory_id": memory.memory_id,
+            "context": format!("Extracted from {}", memory.source)
+        });
+        
+        let result = graph.create_node(
+            "concept".to_string(),
+            label,
+            properties,
+            vec![memory.memory_id.clone()],
+        );
+        
+        if let Err(e) = result {
+            tracing::warn!("Failed to create node for concept '{}': {}", concept, e);
+        }
+    }
+    
+    for i in 0..mentioned_concepts.len() {
+        for j in (i + 1)..mentioned_concepts.len() {
+            let source_node = mentioned_concepts[i].clone();
+            let target_node = mentioned_concepts[j].clone();
+            
+            if let (Ok(source), Ok(target)) = (
+                graph.create_node("concept".to_string(), source_node.clone(), serde_json::json!({"source": "auto_extracted"}), vec![]),
+                graph.create_node("concept".to_string(), target_node.clone(), serde_json::json!({"source": "auto_extracted"}), vec![]),
+            ) {
+                let _ = graph.create_edge(
+                    source.id.clone(),
+                    target.id.clone(),
+                    "related_to".to_string(),
+                    serde_json::json!({"source": "auto_extracted", "memory_id": memory.memory_id}),
+                    vec![memory.memory_id.clone()],
+                    0.5,
+                );
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+const STOP_WORDS: &[&str] = &[
+    "about", "after", "again", "being", "below", "between", "could", "doing", "first", "found",
+    "great", "have", "here", "into", "large", "later", "learn", "like", "made", "make", "many",
+    "might", "more", "most", "much", "must", "never", "only", "over", "part", "place", "right",
+    "same", "school", "should", "since", "small", "some", "such", "take", "than", "their", 
+    "there", "these", "thing", "think", "three", "through", "under", "until", "want", "way", 
+    "well", "were", "what", "when", "where", "which", "while", "who", "will", "with", "would",
+    "your", "this", "that", "from", "with", "the", "and", "are", "but", "not", "all", "can",
+    "had", "her", "was", "one", "our", "out", "has", "get", "its", "use", "also", "back",
+    "been", "call", "did", "each", "few", "give", "him", "how", "inc", "may", "new", "now",
+    "old", "see", "two", "see", "than", "them", "then", "time", "too", "very", "will", "work",
+    "years", "just", "know", "look", "even", "come", "come", "over", "such", "good", "system",
+    "problem", "because", "different", "without", "before", "something", "nothing", "everything",
+    "anything", "however", "other", "where", "while", "another", "those", "every", "around",
+    "example", "following", "another", "written", "called", "including", "certain", "whether",
+    "either", "rather", "already", "number", "possible", "point", "next", "last", "long", "many",
+    "still", "own", "put", "end", "many", "give", "both", "found", "same", "being", "help",
+    "show", "run", "move", "live", "believe", "bring", "happen", "work", "change", "kind",
+    "turn", "start", "thought", "meet", "include", "study", "keep", "remember", "consider",
+    "appear", "buy", "wait", "serve", "die", "send", "expect", "build", "stay", "fall",
+    "cut", "reach", "kill", "remain", "suggest", "raise", "pass", "sell", "require", "report",
+    "decide", "pull", "development", "provide", "create", "another", "strong", "window", "continue",
+    "set", "learn", "change", "lead", "understand", "watch", "follow", "stop", "create", "speak",
+    "read", "allow", "add", "spend", "grow", "open", "walk", "win", "offer", "remember", "love",
+    "consider", "appear", "buy", "wait", "serve", "die", "send", "expect", "build", "stay", "fall",
+];
