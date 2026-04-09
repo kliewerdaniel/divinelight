@@ -422,4 +422,171 @@ mod tests {
         assert_eq!(output.outputs[0].score, 0.0);
         assert!(output.outputs[0].metadata.explanation.contains("failed"));
     }
+
+    #[test]
+    fn test_graph_store_get_or_create_node_dedup() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+
+        let n1 = store
+            .get_or_create_node(
+                "concept".to_string(),
+                "rust".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        let n2 = store
+            .get_or_create_node(
+                "concept".to_string(),
+                "rust".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+
+        assert_eq!(n1.id, n2.id);
+
+        let meta = store.get_metadata().unwrap();
+        assert_eq!(meta.node_count, 1);
+    }
+
+    #[test]
+    fn test_graph_store_create_edge_if_absent_dedup() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+
+        let a = store
+            .create_node(
+                "T".to_string(),
+                "A".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        let b = store
+            .create_node(
+                "T".to_string(),
+                "B".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+
+        let e1 = store
+            .create_edge_if_absent(
+                a.id.clone(),
+                b.id.clone(),
+                "r".to_string(),
+                serde_json::json!({}),
+                vec![],
+                1.0,
+            )
+            .unwrap();
+        let e2 = store
+            .create_edge_if_absent(
+                a.id.clone(),
+                b.id.clone(),
+                "r".to_string(),
+                serde_json::json!({}),
+                vec![],
+                1.0,
+            )
+            .unwrap();
+
+        assert_eq!(e1.id, e2.id);
+
+        let meta = store.get_metadata().unwrap();
+        assert_eq!(meta.edge_count, 1);
+    }
+
+    #[test]
+    fn test_memory_store_delete() {
+        let dir = TempDir::new().unwrap();
+        let mut store = crate::storage::MemoryStore::new(dir.path().to_path_buf()).unwrap();
+
+        let m = store
+            .ingest(
+                "s".to_string(),
+                "p".to_string(),
+                "hello".to_string(),
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(store.count().unwrap(), 1);
+        store.delete(&m.memory_id).unwrap();
+        assert_eq!(store.count().unwrap(), 0);
+        assert!(store.get(&m.memory_id).is_err());
+    }
+
+    #[test]
+    fn test_retrieval_delete_from_index() {
+        let dir = TempDir::new().unwrap();
+        let engine = crate::retrieval::RetrievalEngine::new(dir.path().to_path_buf()).unwrap();
+
+        let m = crate::models::MemoryObject::new(
+            "s".to_string(),
+            "p".to_string(),
+            "content".to_string(),
+            vec![],
+        );
+        engine.index_memory(&m).unwrap();
+
+        std::fs::create_dir_all(dir.path().join("memories")).unwrap();
+        let path = dir
+            .path()
+            .join("memories")
+            .join(format!("{}.json", m.memory_id));
+        std::fs::write(&path, serde_json::to_string(&m).unwrap()).unwrap();
+
+        let before = engine.search("content", 10).unwrap();
+        assert!(!before.is_empty());
+
+        engine.delete_from_index(&m.memory_id).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let after = engine.search("content", 10).unwrap();
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn test_query_nodes_without_node_type_no_panic() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+        store
+            .create_node(
+                "X".to_string(),
+                "foo".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        let nodes = store.query_nodes(None, None, 10).unwrap();
+        assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_graph_metadata_live_count() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+        store
+            .create_node(
+                "T".to_string(),
+                "A".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        store
+            .create_node(
+                "T".to_string(),
+                "B".to_string(),
+                serde_json::json!({}),
+                vec![],
+            )
+            .unwrap();
+        let meta = store.get_metadata().unwrap();
+        assert_eq!(meta.node_count, 2);
+        assert_eq!(meta.edge_count, 0);
+    }
 }

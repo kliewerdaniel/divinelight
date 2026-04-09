@@ -25,9 +25,9 @@ impl IntoResponse for AppError {
     }
 }
 
-impl<E: Into<anyhow::Error>> From<E> for AppError {
-    fn from(err: E) -> Self {
-        Self(err.into())
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> Self {
+        Self(err)
     }
 }
 
@@ -55,16 +55,18 @@ pub struct IngestRequest {
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS, Method::DELETE])
         .allow_headers(Any);
 
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/memory/ingest", post(ingest_memory))
-        .route("/api/v1/memory/:memory_id", get(get_memory))
         .route("/api/v1/memory/list", get(list_memories))
+        .route("/api/v1/memory/search", get(search_memories_get))
+        .route("/api/v1/memory/:memory_id", get(get_memory).delete(delete_memory))
         .route("/api/v1/graph/nodes", post(create_node))
-        .route("/api/v1/graph/nodes/:node_id", get(get_node))
+        .route("/api/v1/graph/nodes/list", get(list_nodes))
+        .route("/api/v1/graph/nodes/:node_id", get(get_node).delete(delete_node_handler))
         .route("/api/v1/graph/edges", post(create_edge))
         .route("/api/v1/graph/edges/:edge_id", get(get_edge))
         .route("/api/v1/graph/metadata", get(get_graph_metadata))
@@ -103,17 +105,39 @@ async fn ingest_memory(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
 ) -> Result<AxumJson<IngestResponse>, AppError> {
-    let mut memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let result = memory.ingest(req.source.clone(), req.format, req.content.clone(), req.tags.clone())?;
-    
-    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    retrieval.index_memory(&result)?;
-    
-    let mut graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    extract_and_create_graph_nodes(&mut graph, &result)?;
+    if req.content.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("Content cannot be empty")));
+    }
+    if req.source.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("Source cannot be empty")));
+    }
+
+    const MAX_CONTENT_BYTES: usize = 1_000_000;
+    if req.content.len() > MAX_CONTENT_BYTES {
+        return Err(AppError(anyhow::anyhow!(
+            "Content too large: {} bytes (max {})",
+            req.content.len(),
+            MAX_CONTENT_BYTES
+        )));
+    }
+
+    let memory_obj = {
+        let mut memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        memory.ingest(req.source.clone(), req.format, req.content.clone(), req.tags.clone())?
+    };
+
+    {
+        let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        retrieval.index_memory(&memory_obj)?;
+    }
+
+    {
+        let mut graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        extract_and_create_graph_nodes(&mut graph, &memory_obj)?;
+    }
     
     Ok(AxumJson(IngestResponse {
-        memory_id: result.memory_id,
+        memory_id: memory_obj.memory_id,
         status: "created".to_string(),
     }))
 }
@@ -149,6 +173,68 @@ async fn list_memories(
     let memories = memory.list_all(limit, offset)?;
     let total = memory.count()?;
     Ok(AxumJson(ListMemoriesResponse { memories, total }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn search_memories_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<SearchQuery>,
+) -> Result<AxumJson<RetrieveResponse>, AppError> {
+    let query = params.q.unwrap_or_else(|| "*".to_string());
+    let limit = params.limit.unwrap_or(20);
+    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let results = retrieval.search(&query, limit)?;
+    Ok(AxumJson(RetrieveResponse { results }))
+}
+
+async fn delete_memory(
+    State(state): State<Arc<AppState>>,
+    Path(memory_id): Path<String>,
+) -> Result<AxumJson<serde_json::Value>, AppError> {
+    {
+        let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        retrieval.delete_from_index(&memory_id)?;
+    }
+    let mut memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    memory.delete(&memory_id)?;
+    Ok(AxumJson(serde_json::json!({ "status": "deleted", "memory_id": memory_id })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListNodesQuery {
+    node_type: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListNodesResponse {
+    nodes: Vec<GraphNode>,
+    total: u64,
+}
+
+async fn list_nodes(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListNodesQuery>,
+) -> Result<AxumJson<ListNodesResponse>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let limit = params.limit.unwrap_or(100);
+    let nodes = graph.query_nodes(params.node_type.as_deref(), None, limit)?;
+    let total = graph.count_nodes()?;
+    Ok(AxumJson(ListNodesResponse { nodes, total }))
+}
+
+async fn delete_node_handler(
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> Result<AxumJson<serde_json::Value>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    graph.delete_node(&node_id)?;
+    Ok(AxumJson(serde_json::json!({ "status": "deleted", "node_id": node_id })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,9 +327,15 @@ async fn traverse_graph(
         graph.query_nodes(None, None, 100)?
     };
     
-    let edges: Vec<GraphEdge> = nodes.iter()
-        .flat_map(|n| graph.get_node_neighbors(&n.id, depth).unwrap_or_default())
-        .collect();
+    let mut seen_edges: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+    for node in &nodes {
+        for edge in graph.get_node_neighbors(&node.id, depth).unwrap_or_default() {
+            if seen_edges.insert(edge.id.clone()) {
+                edges.push(edge);
+            }
+        }
+    }
     
     Ok(AxumJson(TraverseResponse { nodes, edges }))
 }
@@ -340,14 +432,16 @@ async fn detect_conflicts(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DetectConflictsRequest>,
 ) -> Result<AxumJson<DetectConflictsResponse>, AppError> {
-    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut memories = Vec::new();
-    
-    for id in &req.memory_ids {
-        if let Ok(m) = memory.get(id) {
-            memories.push(m);
+    let memories = {
+        let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut result = Vec::new();
+        for id in &req.memory_ids {
+            if let Ok(m) = memory.get(id) {
+                result.push(m);
+            }
         }
-    }
+        result
+    };
     
     let detector = ContradictionDetectorAgent::new();
     let agent_output = detector.execute(memories.iter().collect())?;
@@ -377,14 +471,16 @@ async fn run_verifier(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DetectConflictsRequest>,
 ) -> Result<AxumJson<AgentOutput>, AppError> {
-    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut memories = Vec::new();
-    
-    for id in &req.memory_ids {
-        if let Ok(m) = memory.get(id) {
-            memories.push(m);
+    let memories = {
+        let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut result = Vec::new();
+        for id in &req.memory_ids {
+            if let Ok(m) = memory.get(id) {
+                result.push(m);
+            }
         }
-    }
+        result
+    };
     
     let agent = VerifierAgent::new();
     let output = agent.execute(memories.iter().collect())?;
@@ -409,14 +505,16 @@ async fn run_contradiction_detector(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DetectConflictsRequest>,
 ) -> Result<AxumJson<AgentOutput>, AppError> {
-    let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut memories = Vec::new();
-    
-    for id in &req.memory_ids {
-        if let Ok(m) = memory.get(id) {
-            memories.push(m);
+    let memories = {
+        let memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut result = Vec::new();
+        for id in &req.memory_ids {
+            if let Ok(m) = memory.get(id) {
+                result.push(m);
+            }
         }
-    }
+        result
+    };
     
     let agent = ContradictionDetectorAgent::new();
     let output = agent.execute(memories.iter().collect())?;
@@ -530,49 +628,40 @@ fn extract_and_create_graph_nodes(graph: &mut GraphStore, memory: &MemoryObject)
         .map(|(w, _)| w.clone())
         .collect::<Vec<_>>()
         .into_iter()
-        .take(10)
+        .take(8)
         .collect();
     
-    let concepts_for_edges: Vec<String> = top_words.clone();
-    
+    if top_words.is_empty() {
+        return Ok(());
+    }
+
+    let mut node_ids: Vec<(String, String)> = Vec::new();
     for concept in &top_words {
-        let label = concept.clone();
         let properties = serde_json::json!({
             "source": "auto_extracted",
-            "memory_id": memory.memory_id,
             "context": format!("Extracted from {}", memory.source)
         });
-        
-        let result = graph.create_node(
+        match graph.get_or_create_node(
             "concept".to_string(),
-            label,
+            concept.clone(),
             properties,
             vec![memory.memory_id.clone()],
-        );
-        
-        if let Err(e) = result {
-            tracing::warn!("Failed to create node for concept '{}': {}", concept, e);
+        ) {
+            Ok(node) => node_ids.push((concept.clone(), node.id)),
+            Err(e) => tracing::warn!("Failed to get/create node for '{}': {}", concept, e),
         }
     }
-    
-    for i in 0..concepts_for_edges.len() {
-        for j in (i + 1)..concepts_for_edges.len() {
-            let source_node = concepts_for_edges[i].clone();
-            let target_node = concepts_for_edges[j].clone();
-            
-            if let (Ok(source), Ok(target)) = (
-                graph.create_node("concept".to_string(), source_node.clone(), serde_json::json!({"source": "auto_extracted"}), vec![]),
-                graph.create_node("concept".to_string(), target_node.clone(), serde_json::json!({"source": "auto_extracted"}), vec![]),
-            ) {
-                let _ = graph.create_edge(
-                    source.id.clone(),
-                    target.id.clone(),
-                    "related_to".to_string(),
-                    serde_json::json!({"source": "auto_extracted", "memory_id": memory.memory_id}),
-                    vec![memory.memory_id.clone()],
-                    0.5,
-                );
-            }
+
+    for i in 0..node_ids.len() {
+        for j in (i + 1)..node_ids.len() {
+            let _ = graph.create_edge_if_absent(
+                node_ids[i].1.clone(),
+                node_ids[j].1.clone(),
+                "related_to".to_string(),
+                serde_json::json!({ "source": "auto_extracted", "memory_id": memory.memory_id }),
+                vec![memory.memory_id.clone()],
+                0.5,
+            );
         }
     }
     

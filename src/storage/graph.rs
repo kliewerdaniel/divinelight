@@ -2,6 +2,7 @@ use crate::models::graph::{GraphEdge, GraphMetadata, GraphNode, MemoryGraphLink}
 use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -87,6 +88,11 @@ impl GraphStore {
             [],
         )?;
 
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_node_label_type ON nodes(node_type, label)",
+            [],
+        )?;
+
         let now = Utc::now().to_rfc3339();
         db.execute(
             "INSERT OR IGNORE INTO metadata (graph_id, schema_version, created_at, updated_at, node_count, edge_count, retention_policy)
@@ -137,6 +143,26 @@ impl GraphStore {
         })
     }
 
+    pub fn get_or_create_node(
+        &self,
+        node_type: String,
+        label: String,
+        properties: serde_json::Value,
+        provenance: Vec<String>,
+    ) -> Result<GraphNode> {
+        let existing = self.db.query_row(
+            "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at
+             FROM nodes WHERE node_type = ?1 AND label = ?2",
+            params![node_type, label],
+            Self::map_node,
+        );
+
+        match existing {
+            Ok(node) => Ok(node),
+            Err(_) => self.create_node(node_type, label, properties, provenance),
+        }
+    }
+
     pub fn get_node(&self, id: &str) -> Result<GraphNode> {
         self.db.query_row(
             "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at FROM nodes WHERE id = ?1",
@@ -162,24 +188,27 @@ impl GraphStore {
         _label_contains: Option<&str>,
         limit: usize,
     ) -> Result<Vec<GraphNode>> {
-        let mut sql = "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at FROM nodes WHERE 1=1".to_string();
-        if node_type.is_some() {
-            sql.push_str(" AND node_type = ?1");
-        }
-        sql.push_str(" ORDER BY created_at DESC LIMIT ?2");
-
-        let mut stmt = self.db.prepare(&sql)?;
-        let nodes: Vec<GraphNode> = if let Some(nt) = node_type {
-            stmt.query_map(params![nt, limit as i64], Self::map_node)?
+        if let Some(nt) = node_type {
+            let mut stmt = self.db.prepare(
+                "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at
+                 FROM nodes WHERE node_type = ?1 ORDER BY created_at DESC LIMIT ?2",
+            )?;
+            let nodes: Vec<GraphNode> = stmt
+                .query_map(params![nt, limit as i64], Self::map_node)?
                 .filter_map(|r| r.ok())
-                .collect()
+                .collect();
+            Ok(nodes)
         } else {
-            stmt.query_map(params![limit as i64], Self::map_node)?
+            let mut stmt = self.db.prepare(
+                "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at
+                 FROM nodes ORDER BY created_at DESC LIMIT ?1",
+            )?;
+            let nodes: Vec<GraphNode> = stmt
+                .query_map(params![limit as i64], Self::map_node)?
                 .filter_map(|r| r.ok())
-                .collect()
-        };
-
-        Ok(nodes)
+                .collect();
+            Ok(nodes)
+        }
     }
 
     fn map_node(row: &rusqlite::Row) -> rusqlite::Result<GraphNode> {
@@ -246,6 +275,28 @@ impl GraphStore {
         })
     }
 
+    pub fn create_edge_if_absent(
+        &self,
+        source: String,
+        target: String,
+        relation: String,
+        properties: serde_json::Value,
+        provenance: Vec<String>,
+        confidence: f64,
+    ) -> Result<GraphEdge> {
+        let existing: rusqlite::Result<String> = self.db.query_row(
+            "SELECT id FROM edges WHERE source = ?1 AND target = ?2 AND relation = ?3",
+            params![source, target, relation],
+            |row| row.get(0),
+        );
+
+        if let Ok(id) = existing {
+            return self.get_edge(&id);
+        }
+
+        self.create_edge(source, target, relation, properties, provenance, confidence)
+    }
+
     pub fn get_edge(&self, id: &str) -> Result<GraphEdge> {
         self.db.query_row(
             "SELECT id, source, target, relation, properties, provenance, confidence, version, created_at, updated_at FROM edges WHERE id = ?1",
@@ -309,11 +360,12 @@ impl GraphStore {
     }
 
     pub fn traverse_bfs(&self, start_node_id: &str, max_depth: usize) -> Result<Vec<GraphNode>> {
-        let mut visited = std::collections::HashSet::new();
-        let mut queue: Vec<(String, usize)> = vec![(start_node_id.to_string(), 0)];
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        queue.push_back((start_node_id.to_string(), 0));
         let mut result = Vec::new();
 
-        while let Some((node_id, depth)) = queue.pop() {
+        while let Some((node_id, depth)) = queue.pop_front() {
             if visited.contains(&node_id) || depth > max_depth {
                 continue;
             }
@@ -331,7 +383,9 @@ impl GraphStore {
                     } else {
                         edge.source.clone()
                     };
-                    queue.push((next_node, depth + 1));
+                    if !visited.contains(&next_node) {
+                        queue.push_back((next_node, depth + 1));
+                    }
                 }
             }
         }
@@ -345,11 +399,11 @@ impl GraphStore {
         end_id: &str,
         max_depth: usize,
     ) -> Result<Option<Vec<String>>> {
-        let mut visited = std::collections::HashSet::new();
-        let mut queue: Vec<(String, Vec<String>)> =
-            vec![(start_id.to_string(), vec![start_id.to_string()])];
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
+        queue.push_back((start_id.to_string(), vec![start_id.to_string()]));
 
-        while let Some((node_id, path)) = queue.pop() {
+        while let Some((node_id, path)) = queue.pop_front() {
             if visited.contains(&node_id) {
                 continue;
             }
@@ -372,7 +426,7 @@ impl GraphStore {
                 if !visited.contains(&next_node) {
                     let mut new_path = path.clone();
                     new_path.push(next_node.clone());
-                    queue.push((next_node, new_path));
+                    queue.push_back((next_node, new_path));
                 }
             }
         }
@@ -470,7 +524,7 @@ impl GraphStore {
     }
 
     pub fn get_metadata(&self) -> Result<GraphMetadata> {
-        self.db.query_row(
+        let mut meta = self.db.query_row(
             "SELECT graph_id, schema_version, created_at, updated_at, node_count, edge_count, retention_policy FROM metadata WHERE graph_id = 'main'",
             [],
             |row: &rusqlite::Row| {
@@ -484,7 +538,36 @@ impl GraphStore {
                     retention_policy: row.get(6)?,
                 })
             },
-        ).map_err(|e| anyhow::anyhow!("Metadata not found: {}", e))
+        ).map_err(|e| anyhow::anyhow!("Metadata not found: {}", e))?;
+
+        meta.node_count = self.count_nodes()?;
+        meta.edge_count = self.count_edges()?;
+        Ok(meta)
+    }
+
+    pub fn count_nodes(&self) -> Result<u64> {
+        let count: i64 = self
+            .db
+            .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    pub fn count_edges(&self) -> Result<u64> {
+        let count: i64 = self
+            .db
+            .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    pub fn delete_node(&self, node_id: &str) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM edges WHERE source = ?1 OR target = ?1",
+            params![node_id],
+        )?;
+        self.db
+            .execute("DELETE FROM nodes WHERE id = ?1", params![node_id])?;
+        self.update_metadata_count()?;
+        Ok(())
     }
 
     fn update_metadata_count(&self) -> Result<()> {

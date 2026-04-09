@@ -1,3 +1,720 @@
+Here is the full coding agent prompt. It is deeply detailed, ordered by severity, and covers every bug, architectural flaw, and UX deficiency found in the codebase.
+
+---
+
+## DivineLight — Comprehensive Fix & Improvement Agent Prompt
+
+You are an autonomous coding agent working on **DivineLight**, a local-first unified AI memory system written in Rust with an Axum HTTP backend and a plain HTML/JS frontend. You have full read/write access to the repository. Execute every step below in order. Do not skip steps. For each file edit, re-read the file immediately before making the change.
+
+---
+
+## PART 1 — CRITICAL BUG FIXES (compilation-safe, logic-breaking)
+
+---
+
+### FIX 1 — `query_nodes` SQL Parameter Binding Bug
+
+**File: `src/storage/graph.rs`**
+
+The `query_nodes` method constructs SQL conditionally but always binds `limit` to `?2` even when the SQL only has one placeholder (`?1`) because the `node_type` branch is absent. This causes a rusqlite `InvalidParameterCount` error on every call without `node_type`.
+
+Replace the entire `query_nodes` method with a version that builds parameters correctly:
+
+```rust
+pub fn query_nodes(
+    &self,
+    node_type: Option<&str>,
+    _label_contains: Option<&str>,
+    limit: usize,
+) -> Result<Vec<GraphNode>> {
+    let nodes: Vec<GraphNode> = if let Some(nt) = node_type {
+        let mut stmt = self.db.prepare(
+            "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at
+             FROM nodes WHERE node_type = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        stmt.query_map(params![nt, limit as i64], Self::map_node)?
+            .filter_map(|r| r.ok())
+            .collect()
+    } else {
+        let mut stmt = self.db.prepare(
+            "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at
+             FROM nodes ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        stmt.query_map(params![limit as i64], Self::map_node)?
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+    Ok(nodes)
+}
+```
+
+---
+
+### FIX 2 — BFS Traversal Uses Stack (DFS) — Fix to True BFS
+
+**File: `src/storage/graph.rs`**
+
+Both `traverse_bfs` and `find_path` use `Vec::pop()` which is LIFO (depth-first). Change both to use `std::collections::VecDeque` for proper FIFO breadth-first traversal.
+
+Add `use std::collections::VecDeque;` at the top of the file.
+
+Replace `traverse_bfs`:
+
+```rust
+pub fn traverse_bfs(&self, start_node_id: &str, max_depth: usize) -> Result<Vec<GraphNode>> {
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+    queue.push_back((start_node_id.to_string(), 0));
+    let mut result = Vec::new();
+
+    while let Some((node_id, depth)) = queue.pop_front() {
+        if visited.contains(&node_id) || depth > max_depth {
+            continue;
+        }
+        visited.insert(node_id.clone());
+
+        if let Ok(node) = self.get_node(&node_id) {
+            result.push(node);
+        }
+
+        if depth < max_depth {
+            let neighbors = self.get_node_neighbors(&node_id, 100)?;
+            for edge in neighbors {
+                let next_node = if edge.source == node_id {
+                    edge.target.clone()
+                } else {
+                    edge.source.clone()
+                };
+                if !visited.contains(&next_node) {
+                    queue.push_back((next_node, depth + 1));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+```
+
+Replace `find_path`:
+
+```rust
+pub fn find_path(
+    &self,
+    start_id: &str,
+    end_id: &str,
+    max_depth: usize,
+) -> Result<Option<Vec<String>>> {
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
+    queue.push_back((start_id.to_string(), vec![start_id.to_string()]));
+
+    while let Some((node_id, path)) = queue.pop_front() {
+        if visited.contains(&node_id) {
+            continue;
+        }
+        visited.insert(node_id.clone());
+
+        if node_id == end_id {
+            return Ok(Some(path));
+        }
+
+        if path.len() >= max_depth {
+            continue;
+        }
+
+        let neighbors = self.get_node_neighbors(&node_id, 100)?;
+        for edge in neighbors {
+            // Only follow directed edges outward from current node
+            if edge.source != node_id {
+                continue;
+            }
+            let next_node = edge.target.clone();
+            if !visited.contains(&next_node) {
+                let mut new_path = path.clone();
+                new_path.push(next_node.clone());
+                queue.push_back((next_node, new_path));
+            }
+        }
+    }
+    Ok(None)
+}
+```
+
+---
+
+### FIX 3 — Graph Node Deduplication (Duplicate Nodes Created on Every Ingest)
+
+**File: `src/storage/graph.rs`**
+
+There is no UNIQUE constraint on `(node_type, label)`, and `extract_and_create_graph_nodes` in `src/api/mod.rs` calls `create_node` multiple times for the same concept — once in the `top_words` loop and again inside the edge-creation double loop. Each ingest of similar content therefore creates hundreds of duplicate nodes.
+
+**Step A** — Add a UNIQUE index in `GraphStore::new`:
+
+In the `GraphStore::new` function, after the existing index creation calls, add:
+
+```rust
+db.execute(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_node_label_type ON nodes(node_type, label)",
+    [],
+)?;
+```
+
+**Step B** — Add a `get_or_create_node` method to `GraphStore`:
+
+```rust
+pub fn get_or_create_node(
+    &self,
+    node_type: String,
+    label: String,
+    properties: serde_json::Value,
+    provenance: Vec<String>,
+) -> Result<GraphNode> {
+    // Check if a node with this type+label already exists
+    let existing = self.db.query_row(
+        "SELECT id, node_type, label, properties, provenance, version, created_at, updated_at
+         FROM nodes WHERE node_type = ?1 AND label = ?2",
+        params![node_type, label],
+        Self::map_node,
+    );
+
+    match existing {
+        Ok(node) => Ok(node),
+        Err(_) => self.create_node(node_type, label, properties, provenance),
+    }
+}
+```
+
+**Step C** — Rewrite `extract_and_create_graph_nodes` in `src/api/mod.rs` to use `get_or_create_node` and avoid double-creation:
+
+Replace the entire `extract_and_create_graph_nodes` function:
+
+```rust
+fn extract_and_create_graph_nodes(graph: &mut GraphStore, memory: &MemoryObject) -> Result<(), AppError> {
+    let content = &memory.content;
+
+    // Count significant word frequencies
+    let mut word_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for word in content.split(|c: char| !c.is_alphanumeric()) {
+        let w = word.to_lowercase();
+        if w.len() > 4 && !STOP_WORDS.contains(&w.as_str()) {
+            *word_freq.entry(w).or_insert(0) += 1;
+        }
+    }
+
+    // Only extract concepts appearing at least twice; cap at 8
+    let mut top_words: Vec<String> = word_freq
+        .into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .map(|(w, _)| w)
+        .collect();
+    top_words.truncate(8);
+
+    if top_words.is_empty() {
+        return Ok(());
+    }
+
+    // Create (or retrieve existing) nodes — never create duplicates
+    let mut node_ids: Vec<(String, String)> = Vec::new(); // (label, node_id)
+    for concept in &top_words {
+        let properties = serde_json::json!({
+            "source": "auto_extracted",
+            "context": format!("Extracted from {}", memory.source)
+        });
+        match graph.get_or_create_node(
+            "concept".to_string(),
+            concept.clone(),
+            properties,
+            vec![memory.memory_id.clone()],
+        ) {
+            Ok(node) => node_ids.push((concept.clone(), node.id)),
+            Err(e) => tracing::warn!("Failed to get/create node for '{}': {}", concept, e),
+        }
+    }
+
+    // Create edges between co-occurring concepts (with dedup via INSERT OR IGNORE)
+    for i in 0..node_ids.len() {
+        for j in (i + 1)..node_ids.len() {
+            let _ = graph.create_edge_if_absent(
+                node_ids[i].1.clone(),
+                node_ids[j].1.clone(),
+                "related_to".to_string(),
+                serde_json::json!({ "source": "auto_extracted", "memory_id": memory.memory_id }),
+                vec![memory.memory_id.clone()],
+                0.5,
+            );
+        }
+    }
+
+    Ok(())
+}
+```
+
+**Step D** — Add `create_edge_if_absent` to `GraphStore` in `src/storage/graph.rs`:
+
+```rust
+/// Creates an edge only if one with the same source+target+relation does not exist.
+pub fn create_edge_if_absent(
+    &self,
+    source: String,
+    target: String,
+    relation: String,
+    properties: serde_json::Value,
+    provenance: Vec<String>,
+    confidence: f64,
+) -> Result<GraphEdge> {
+    // Check for existing edge
+    let existing: rusqlite::Result<String> = self.db.query_row(
+        "SELECT id FROM edges WHERE source = ?1 AND target = ?2 AND relation = ?3",
+        params![source, target, relation],
+        |row| row.get(0),
+    );
+
+    if let Ok(id) = existing {
+        return self.get_edge(&id);
+    }
+
+    self.create_edge(source, target, relation, properties, provenance, confidence)
+}
+```
+
+---
+
+### FIX 4 — `traverse_graph` Handler Returns Duplicate Edges
+
+**File: `src/api/mod.rs`**
+
+The `traverse_graph` handler collects edges via `flat_map` over all nodes, so every edge incident to multiple traversed nodes is returned multiple times.
+
+Replace the handler body:
+
+```rust
+async fn traverse_graph(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TraverseRequest>,
+) -> Result<AxumJson<TraverseResponse>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let depth = req.depth.unwrap_or(3);
+    let start_node_id = req.start_node_id.unwrap_or_default();
+
+    let nodes = if !start_node_id.is_empty() {
+        graph.traverse_bfs(&start_node_id, depth)?
+    } else {
+        graph.query_nodes(None, None, 100)?
+    };
+
+    // Collect edges and deduplicate by id
+    let mut seen_edges: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+    for node in &nodes {
+        for edge in graph.get_node_neighbors(&node.id, depth).unwrap_or_default() {
+            if seen_edges.insert(edge.id.clone()) {
+                edges.push(edge);
+            }
+        }
+    }
+
+    Ok(AxumJson(TraverseResponse { nodes, edges }))
+}
+```
+
+---
+
+### FIX 5 — `import_data` Does Not Re-Index into Retrieval DB
+
+**File: `src/backup/mod.rs`**
+
+After importing, memories exist as `.json` files but are not indexed in `retrieval.db`, making them unsearchable. The `BackupManager` needs a reference to the retrieval engine path, or the import must write directly to the retrieval index.
+
+Replace `import_data` with a version that opens the retrieval DB and inserts index rows:
+
+```rust
+pub fn import_data(&self, import_path: &Path) -> Result<u64> {
+    let mut count = 0u64;
+    let content = fs::read_to_string(import_path)?;
+
+    fs::create_dir_all(self.data_dir.join("memories"))?;
+
+    // Open retrieval DB for re-indexing
+    let retrieval_db_path = self.data_dir.join("retrieval.db");
+    let retrieval_conn = rusqlite::Connection::open(&retrieval_db_path)?;
+    retrieval_conn.execute(
+        "CREATE TABLE IF NOT EXISTS search_index (
+            memory_id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(memory) = serde_json::from_str::<MemoryObject>(line) {
+            // Write JSON file
+            let file_path = self
+                .data_dir
+                .join("memories")
+                .join(format!("{}.json", memory.memory_id));
+            let mut file = fs::File::create(&file_path)?;
+            file.write_all(line.as_bytes())?;
+
+            // Re-index in retrieval DB
+            let tags_json = serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".to_string());
+            let _ = retrieval_conn.execute(
+                "INSERT OR REPLACE INTO search_index (memory_id, content, tags, source, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    memory.memory_id,
+                    memory.content,
+                    tags_json,
+                    memory.source,
+                    memory.created_at.to_rfc3339(),
+                ],
+            );
+
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+```
+
+---
+
+### FIX 6 — `count_lines` Parameter Type Should Use `&Path` Not `&PathBuf`
+
+**File: `src/backup/mod.rs`**
+
+Change the signature of `count_lines` for idiomatic Rust:
+
+```rust
+fn count_lines(&self, db_path: &Path, query: &str) -> Result<u64> {
+```
+
+Update the two call sites from `&backup_db` (which is already a `PathBuf`) — since `&PathBuf` coerces to `&Path` this requires no other changes, but clippy will now accept it.
+
+---
+
+### FIX 7 — `ingest_memory` Holds Two Mutex Locks Simultaneously (Deadlock Risk)
+
+**File: `src/api/mod.rs`**
+
+The `ingest_memory` handler acquires `state.memory` lock, then while still holding it acquires `state.retrieval` and `state.graph` locks. If any of those locks are poisoned or there is any ordering inconsistency across handlers, this can deadlock. Drop each lock before acquiring the next by collecting the values you need.
+
+Replace the `ingest_memory` handler:
+
+```rust
+async fn ingest_memory(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<IngestRequest>,
+) -> Result<AxumJson<IngestResponse>, AppError> {
+    // Validate inputs
+    if req.content.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("Content cannot be empty")));
+    }
+    if req.source.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("Source cannot be empty")));
+    }
+
+    // Step 1: ingest into memory store, then release lock
+    let memory_obj = {
+        let mut memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        memory.ingest(req.source.clone(), req.format, req.content.clone(), req.tags.clone())?
+    };
+
+    // Step 2: index in retrieval engine, then release lock
+    {
+        let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        retrieval.index_memory(&memory_obj)?;
+    }
+
+    // Step 3: extract concepts into graph, then release lock
+    {
+        let mut graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        extract_and_create_graph_nodes(&mut graph, &memory_obj)?;
+    }
+
+    Ok(AxumJson(IngestResponse {
+        memory_id: memory_obj.memory_id,
+        status: "created".to_string(),
+    }))
+}
+```
+
+Apply the same sequential lock-drop pattern to `run_verifier`, `run_contradiction_detector`, and `detect_conflicts` — do not hold `state.memory` lock while calling agent `execute`.
+
+---
+
+## PART 2 — ARCHITECTURE & DATA INTEGRITY IMPROVEMENTS
+
+---
+
+### IMPROVEMENT 1 — Add Unique Constraint on Retrieval Index
+
+**File: `src/retrieval/mod.rs`**
+
+The `search_index` table has `memory_id TEXT PRIMARY KEY` which is good, but `index_memory` uses `INSERT OR REPLACE` which silently drops and re-inserts, resetting any future extended fields. Change to `INSERT OR IGNORE` so re-indexing an existing memory is a no-op unless content changes:
+
+```rust
+pub fn index_memory(&self, memory: &MemoryObject) -> Result<()> {
+    self.db.execute(
+        "INSERT OR IGNORE INTO search_index (memory_id, content, tags, source, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            memory.memory_id,
+            memory.content.clone(),
+            serde_json::to_string(&memory.tags)?,
+            memory.source.clone(),
+            memory.created_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+```
+
+---
+
+### IMPROVEMENT 2 — Add `GraphStore::count_nodes` and `count_edges` Methods
+
+**File: `src/storage/graph.rs`**
+
+The metadata table is updated via `update_metadata_count` on every write, but this can drift if a write fails mid-transaction. Add live-count methods:
+
+```rust
+pub fn count_nodes(&self) -> Result<u64> {
+    let count: i64 = self.db.query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))?;
+    Ok(count as u64)
+}
+
+pub fn count_edges(&self) -> Result<u64> {
+    let count: i64 = self.db.query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))?;
+    Ok(count as u64)
+}
+```
+
+Update `get_metadata` to return live counts rather than relying on the cached counter in the metadata table:
+
+```rust
+pub fn get_metadata(&self) -> Result<GraphMetadata> {
+    let mut meta = self.db.query_row(
+        "SELECT graph_id, schema_version, created_at, updated_at, node_count, edge_count, retention_policy
+         FROM metadata WHERE graph_id = 'main'",
+        [],
+        |row: &rusqlite::Row| {
+            Ok(GraphMetadata {
+                graph_id: row.get(0)?,
+                schema_version: row.get(1)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
+                    .unwrap().with_timezone(&chrono::Utc),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                    .unwrap().with_timezone(&chrono::Utc),
+                node_count: row.get(4)?,
+                edge_count: row.get(5)?,
+                retention_policy: row.get(6)?,
+            })
+        },
+    ).map_err(|e| anyhow::anyhow!("Metadata not found: {}", e))?;
+
+    // Always return live counts to avoid drift
+    meta.node_count = self.count_nodes()?;
+    meta.edge_count = self.count_edges()?;
+    Ok(meta)
+}
+```
+
+---
+
+### IMPROVEMENT 3 — Add `GET /api/v1/graph/nodes` Endpoint (List Nodes)
+
+**File: `src/api/mod.rs`**
+
+There is no way to list graph nodes from the frontend. Add:
+
+In `create_router`, add:
+```rust
+.route("/api/v1/graph/nodes/list", get(list_nodes))
+```
+
+Add handler:
+```rust
+#[derive(Debug, Deserialize)]
+struct ListNodesQuery {
+    node_type: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListNodesResponse {
+    nodes: Vec<GraphNode>,
+    total: u64,
+}
+
+async fn list_nodes(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListNodesQuery>,
+) -> Result<AxumJson<ListNodesResponse>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let limit = params.limit.unwrap_or(100);
+    let nodes = graph.query_nodes(params.node_type.as_deref(), None, limit)?;
+    let total = graph.count_nodes()?;
+    Ok(AxumJson(ListNodesResponse { nodes, total }))
+}
+```
+
+---
+
+### IMPROVEMENT 4 — Add `GET /api/v1/memory/search` GET Endpoint for URL-based search
+
+**File: `src/api/mod.rs`**
+
+Add to the router:
+```rust
+.route("/api/v1/memory/search", get(search_memories_get))
+```
+
+Add handler so the frontend can use simple GET requests for search:
+```rust
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn search_memories_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<SearchQuery>,
+) -> Result<AxumJson<RetrieveResponse>, AppError> {
+    let query = params.q.unwrap_or_else(|| "*".to_string());
+    let limit = params.limit.unwrap_or(20);
+    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let results = retrieval.search(&query, limit)?;
+    Ok(AxumJson(RetrieveResponse { results }))
+}
+```
+
+---
+
+### IMPROVEMENT 5 — Expose `MemoryStore::delete` and `GraphStore::delete_node`
+
+**File: `src/storage/memory.rs`**
+
+Add a soft-delete (or hard delete) to allow the frontend to remove memories. Hard delete is appropriate for a local-first system:
+
+```rust
+pub fn delete(&mut self, memory_id: &str) -> Result<()> {
+    // Remove the JSON file
+    let file_path = self
+        .data_dir
+        .join("memories")
+        .join(format!("{}.json", memory_id));
+    if file_path.exists() {
+        std::fs::remove_file(&file_path)?;
+    }
+    // Remove from index
+    self.db.execute("DELETE FROM memories WHERE memory_id = ?1", params![memory_id])?;
+    self.db.execute("DELETE FROM tags WHERE memory_id = ?1", params![memory_id])?;
+    Ok(())
+}
+```
+
+**File: `src/storage/graph.rs`**
+
+```rust
+pub fn delete_node(&self, node_id: &str) -> Result<()> {
+    self.db.execute("DELETE FROM edges WHERE source = ?1 OR target = ?1", params![node_id])?;
+    self.db.execute("DELETE FROM nodes WHERE id = ?1", params![node_id])?;
+    self.update_metadata_count()?;
+    Ok(())
+}
+```
+
+**File: `src/api/mod.rs`**
+
+Add to router:
+```rust
+.route("/api/v1/memory/:memory_id", axum::routing::delete(delete_memory))
+.route("/api/v1/graph/nodes/:node_id", axum::routing::delete(delete_node))
+```
+
+Add `use axum::routing::delete as axum_delete;` (or inline the delete routes). Add handlers:
+
+```rust
+async fn delete_memory(
+    State(state): State<Arc<AppState>>,
+    Path(memory_id): Path<String>,
+) -> Result<AxumJson<serde_json::Value>, AppError> {
+    // Also remove from retrieval index
+    {
+        let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        retrieval.delete_from_index(&memory_id)?;
+    }
+    let mut memory = state.memory.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    memory.delete(&memory_id)?;
+    Ok(AxumJson(serde_json::json!({ "status": "deleted", "memory_id": memory_id })))
+}
+
+async fn delete_node_handler(
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> Result<AxumJson<serde_json::Value>, AppError> {
+    let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+    graph.delete_node(&node_id)?;
+    Ok(AxumJson(serde_json::json!({ "status": "deleted", "node_id": node_id })))
+}
+```
+
+**File: `src/retrieval/mod.rs`**
+
+Add:
+```rust
+pub fn delete_from_index(&self, memory_id: &str) -> Result<()> {
+    self.db.execute("DELETE FROM search_index WHERE memory_id = ?1", params![memory_id])?;
+    Ok(())
+}
+```
+
+---
+
+### IMPROVEMENT 6 — Add Request Size and Content Length Guard
+
+**File: `src/api/mod.rs`**
+
+Very large content strings can lock the server for extended periods during SHA256 computation and graph extraction. Add a content size limit in `ingest_memory` after the empty-check:
+
+```rust
+const MAX_CONTENT_BYTES: usize = 1_000_000; // 1MB
+if req.content.len() > MAX_CONTENT_BYTES {
+    return Err(AppError(anyhow::anyhow!(
+        "Content too large: {} bytes (max {})",
+        req.content.len(),
+        MAX_CONTENT_BYTES
+    )));
+}
+```
+
+---
+
+## PART 3 — COMPLETE FRONTEND REWRITE
+
+**File: `frontend/index.html`**
+
+The current frontend has several critical issues:
+- The `call()` function routes all API errors to `systemResult`, polluting the health panel with unrelated errors.
+- `showGraphTab` and `showRetrieveTab` use the deprecated `event` global object — they fail silently in strict contexts.
+- Tab switching does not remove `active` class from siblings correctly across panels.
+- There is no way to browse all memories, view memory details, or delete memories.
+- The agent panel for verifier/contradiction provides no way to select which memory IDs to use.
+- The stats display shows "—" for beliefs with no explanation.
+- There are no loading states — the user sees no feedback while API calls are in flight.
+- The graph traverse panel has no meaningful output for the default "show all" case.
+
+Replace the **entire** `frontend/index.html` with the following. This is a complete, self-contained rewrite with all functionality preserved and improved:
+
+```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1070,3 +1787,255 @@ function copyToClipboard(text, btn) {
 </script>
 </body>
 </html>
+```
+
+---
+
+## PART 4 — ADDITIONAL RUST FIXES
+
+---
+
+### FIX 8 — Routing Order: Static Routes Must Precede Dynamic Routes
+
+**File: `src/api/mod.rs`**
+
+In Axum 0.7, static segments take priority over dynamic segments only when registered correctly. Ensure `list` and `search` routes come before `/:memory_id` in `create_router`. Verify the route order is:
+
+```rust
+.route("/api/v1/memory/list", get(list_memories))
+.route("/api/v1/memory/search", get(search_memories_get))
+.route("/api/v1/graph/nodes/list", get(list_nodes))
+.route("/api/v1/memory/:memory_id", get(get_memory).delete(delete_memory))
+.route("/api/v1/graph/nodes/:node_id", get(get_node).delete(delete_node_handler))
+```
+
+Combine the GET and DELETE methods on the same route using the method chaining syntax shown above.
+
+---
+
+### FIX 9 — Remove `use axum::extract::Json` Ambiguity
+
+**File: `src/api/mod.rs`**
+
+The file imports both `Json` (for extraction) and `Json as AxumJson` (for response). Consolidate to avoid confusion:
+
+```rust
+use axum::{
+    Router,
+    routing::{get, post},
+    extract::{Path, State, Json as ExtractJson},
+    response::Json as AxumJson,
+    http::Method,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+```
+
+Update all handler function signatures to use `ExtractJson` for request body extraction and `AxumJson` for response. For example:
+
+```rust
+async fn ingest_memory(
+    State(state): State<Arc<AppState>>,
+    ExtractJson(req): ExtractJson<IngestRequest>,
+) -> Result<AxumJson<IngestResponse>, AppError> {
+```
+
+Apply this rename consistently to all POST handlers with request bodies.
+
+---
+
+### FIX 10 — `AppError` Should Implement `std::error::Error`
+
+**File: `src/api/mod.rs`**
+
+The `From<E: Into<anyhow::Error>>` impl creates a conflict with the blanket `From<anyhow::Error>` when used with `?` in certain contexts. Tighten the impl:
+
+```rust
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> Self {
+        Self(err)
+    }
+}
+```
+
+Remove the generic `impl<E: Into<anyhow::Error>> From<E> for AppError`. Instead, use `.map_err(anyhow::Error::from)?` in any handler where the underlying error is not already `anyhow::Error`. This avoids the orphan rule conflict and gives cleaner error chains.
+
+---
+
+## PART 5 — TESTS
+
+---
+
+### IMPROVEMENT 7 — Add Integration Tests for New Endpoints
+
+**File: `src/tests.rs`**
+
+Add these test blocks inside the existing `mod tests { ... }` block:
+
+```rust
+#[test]
+fn test_graph_store_get_or_create_node_dedup() {
+    let dir = TempDir::new().unwrap();
+    let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+
+    let n1 = store.get_or_create_node(
+        "concept".to_string(), "rust".to_string(), serde_json::json!({}), vec![]
+    ).unwrap();
+    let n2 = store.get_or_create_node(
+        "concept".to_string(), "rust".to_string(), serde_json::json!({}), vec![]
+    ).unwrap();
+
+    // Must return the same ID — no duplicate created
+    assert_eq!(n1.id, n2.id);
+
+    let meta = store.get_metadata().unwrap();
+    assert_eq!(meta.node_count, 1);
+}
+
+#[test]
+fn test_graph_store_create_edge_if_absent_dedup() {
+    let dir = TempDir::new().unwrap();
+    let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+
+    let a = store.create_node("T".to_string(), "A".to_string(), serde_json::json!({}), vec![]).unwrap();
+    let b = store.create_node("T".to_string(), "B".to_string(), serde_json::json!({}), vec![]).unwrap();
+
+    let e1 = store.create_edge_if_absent(a.id.clone(), b.id.clone(), "r".to_string(), serde_json::json!({}), vec![], 1.0).unwrap();
+    let e2 = store.create_edge_if_absent(a.id.clone(), b.id.clone(), "r".to_string(), serde_json::json!({}), vec![], 1.0).unwrap();
+
+    assert_eq!(e1.id, e2.id);
+
+    let meta = store.get_metadata().unwrap();
+    assert_eq!(meta.edge_count, 1);
+}
+
+#[test]
+fn test_memory_store_delete() {
+    let dir = TempDir::new().unwrap();
+    let mut store = crate::storage::MemoryStore::new(dir.path().to_path_buf()).unwrap();
+
+    let m = store.ingest("s".to_string(), "p".to_string(), "hello".to_string(), vec![]).unwrap();
+    assert_eq!(store.count().unwrap(), 1);
+    store.delete(&m.memory_id).unwrap();
+    assert_eq!(store.count().unwrap(), 0);
+    assert!(store.get(&m.memory_id).is_err());
+}
+
+#[test]
+fn test_retrieval_delete_from_index() {
+    let dir = TempDir::new().unwrap();
+    let engine = crate::retrieval::RetrievalEngine::new(dir.path().to_path_buf()).unwrap();
+
+    let m = crate::models::MemoryObject::new("s".to_string(), "p".to_string(), "content".to_string(), vec![]);
+    engine.index_memory(&m).unwrap();
+
+    std::fs::create_dir_all(dir.path().join("memories")).unwrap();
+    let path = dir.path().join("memories").join(format!("{}.json", m.memory_id));
+    std::fs::write(&path, serde_json::to_string(&m).unwrap()).unwrap();
+
+    let before = engine.search("content", 10).unwrap();
+    assert!(!before.is_empty());
+
+    engine.delete_from_index(&m.memory_id).unwrap();
+    std::fs::remove_file(&path).unwrap();
+
+    let after = engine.search("content", 10).unwrap();
+    assert!(after.is_empty());
+}
+
+#[test]
+fn test_query_nodes_without_node_type_no_panic() {
+    let dir = TempDir::new().unwrap();
+    let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+    store.create_node("X".to_string(), "foo".to_string(), serde_json::json!({}), vec![]).unwrap();
+    // This was broken before Fix 1 — must not panic or return an error
+    let nodes = store.query_nodes(None, None, 10).unwrap();
+    assert_eq!(nodes.len(), 1);
+}
+
+#[test]
+fn test_graph_metadata_live_count() {
+    let dir = TempDir::new().unwrap();
+    let store = crate::storage::GraphStore::new(dir.path().to_path_buf()).unwrap();
+    store.create_node("T".to_string(), "A".to_string(), serde_json::json!({}), vec![]).unwrap();
+    store.create_node("T".to_string(), "B".to_string(), serde_json::json!({}), vec![]).unwrap();
+    let meta = store.get_metadata().unwrap();
+    assert_eq!(meta.node_count, 2);
+    assert_eq!(meta.edge_count, 0);
+}
+```
+
+---
+
+## PART 6 — VERIFICATION
+
+After all changes are applied, run:
+
+```bash
+cargo build 2>&1
+```
+
+Fix any compilation errors. Then:
+
+```bash
+cargo test 2>&1
+```
+
+All tests must pass (minimum 22 tests). If a test fails, fix the root cause — never delete a test.
+
+```bash
+cargo clippy -- -D warnings 2>&1
+```
+
+Fix all warnings. Common expected issues after these changes:
+- `VecDeque` needs `use std::collections::VecDeque` in `graph.rs`
+- `rusqlite::params!` needs explicit import in `backup/mod.rs` — add `use rusqlite::params;`
+- `delete` routing requires `use axum::routing::delete` — add the import
+
+Final smoke test:
+
+```bash
+cargo run &
+sleep 2
+curl -s http://127.0.0.1:8080/health | python3 -m json.tool
+curl -s -X POST http://127.0.0.1:8080/api/v1/memory/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"source":"smoke-test","format":"plaintext","content":"The quick brown fox jumps over the lazy dog","tags":["test"]}' \
+  | python3 -m json.tool
+curl -s 'http://127.0.0.1:8080/api/v1/memory/list?limit=5' | python3 -m json.tool
+curl -s 'http://127.0.0.1:8080/api/v1/graph/nodes/list' | python3 -m json.tool
+```
+
+The implementation is complete when:
+1. `cargo build` is error-free
+2. `cargo test` shows ≥ 22 tests passing
+3. `cargo clippy -- -D warnings` is warning-free
+4. `/health` returns `{"status":"ok","version":"0.1.0"}`
+5. Ingesting a memory creates graph nodes visible in `/api/v1/graph/nodes/list` without duplicates
+6. The frontend opens, shows the memory list, and supports selecting a memory to view full detail, running interpretation inline, and deleting it
+7. `query_nodes(None, None, 10)` does not panic or error
+
+---
+
+## Summary of All Changes
+
+| # | File | Change |
+|---|------|--------|
+| Fix 1 | `src/storage/graph.rs` | `query_nodes` SQL parameter binding bug |
+| Fix 2 | `src/storage/graph.rs` | `traverse_bfs` and `find_path` use VecDeque (real BFS) |
+| Fix 3 | `src/storage/graph.rs` + `src/api/mod.rs` | Node dedup via UNIQUE index + `get_or_create_node` + `create_edge_if_absent` |
+| Fix 4 | `src/api/mod.rs` | `traverse_graph` deduplicates returned edges |
+| Fix 5 | `src/backup/mod.rs` | `import_data` re-indexes into retrieval.db |
+| Fix 6 | `src/backup/mod.rs` | `count_lines` uses `&Path` not `&PathBuf` |
+| Fix 7 | `src/api/mod.rs` | `ingest_memory` drops locks sequentially to prevent deadlock |
+| Fix 8 | `src/api/mod.rs` | Route order: static before dynamic |
+| Fix 9 | `src/api/mod.rs` | `Json` import ambiguity resolved |
+| Fix 10 | `src/api/mod.rs` | `AppError` From impl tightened |
+| Imp 1 | `src/retrieval/mod.rs` | `INSERT OR IGNORE` in `index_memory` |
+| Imp 2 | `src/storage/graph.rs` | Live-count `count_nodes`/`count_edges`; `get_metadata` returns live values |
+| Imp 3 | `src/api/mod.rs` | `GET /api/v1/graph/nodes/list` endpoint |
+| Imp 4 | `src/api/mod.rs` | `GET /api/v1/memory/search` endpoint |
+| Imp 5 | `src/storage/memory.rs` + `src/storage/graph.rs` + `src/retrieval/mod.rs` + `src/api/mod.rs` | Delete endpoints for memories and nodes |
+| Imp 6 | `src/api/mod.rs` | Content size guard on ingest |
+| Imp 7 | `src/tests.rs` | 6 new targeted regression tests |
+| UX | `frontend/index.html` | Complete rewrite: sidebar navigation, memory detail view, inline interpretation, delete button, agent ID pre-fill, per-panel error display, loading spinners, graph node browser, search results pane |

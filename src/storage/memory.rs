@@ -186,4 +186,21 @@ impl MemoryStore {
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
         Ok(count as u64)
     }
+
+    pub fn delete(&mut self, memory_id: &str) -> Result<()> {
+        let file_path = self
+            .data_dir
+            .join("memories")
+            .join(format!("{}.json", memory_id));
+        if file_path.exists() {
+            std::fs::remove_file(&file_path)?;
+        }
+        self.db.execute(
+            "DELETE FROM memories WHERE memory_id = ?1",
+            params![memory_id],
+        )?;
+        self.db
+            .execute("DELETE FROM tags WHERE memory_id = ?1", params![memory_id])?;
+        Ok(())
+    }
 }

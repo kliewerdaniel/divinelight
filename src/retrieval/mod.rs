@@ -59,7 +59,7 @@ impl RetrievalEngine {
 
     pub fn index_memory(&self, memory: &MemoryObject) -> Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO search_index (memory_id, content, tags, source, created_at)
+            "INSERT OR IGNORE INTO search_index (memory_id, content, tags, source, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 memory.memory_id,
@@ -159,5 +159,13 @@ impl RetrievalEngine {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn delete_from_index(&self, memory_id: &str) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM search_index WHERE memory_id = ?1",
+            params![memory_id],
+        )?;
+        Ok(())
     }
 }

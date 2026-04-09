@@ -101,7 +101,7 @@ impl BackupManager {
         }
     }
 
-    pub fn restore_backup(&self, backup_path: &PathBuf) -> Result<()> {
+    pub fn restore_backup(&self, backup_path: &Path) -> Result<()> {
         let manifest_path = backup_path.join("manifest.json");
         if !manifest_path.exists() {
             return Err(anyhow::anyhow!("No manifest found in backup"));
@@ -155,6 +155,21 @@ impl BackupManager {
         let mut count = 0u64;
         let content = fs::read_to_string(import_path)?;
 
+        fs::create_dir_all(self.data_dir.join("memories"))?;
+
+        let retrieval_db_path = self.data_dir.join("retrieval.db");
+        let retrieval_conn = rusqlite::Connection::open(&retrieval_db_path)?;
+        retrieval_conn.execute(
+            "CREATE TABLE IF NOT EXISTS search_index (
+                memory_id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                tags TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -166,6 +181,21 @@ impl BackupManager {
                     .join(format!("{}.json", memory.memory_id));
                 let mut file = fs::File::create(&file_path)?;
                 file.write_all(line.as_bytes())?;
+
+                let tags_json =
+                    serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".to_string());
+                let _ = retrieval_conn.execute(
+                    "INSERT OR REPLACE INTO search_index (memory_id, content, tags, source, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        memory.memory_id,
+                        memory.content,
+                        tags_json,
+                        memory.source,
+                        memory.created_at.to_rfc3339(),
+                    ],
+                );
+
                 count += 1;
             }
         }
