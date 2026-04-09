@@ -512,8 +512,6 @@ async fn import_data(
 fn extract_and_create_graph_nodes(graph: &mut GraphStore, memory: &MemoryObject) -> Result<(), AppError> {
     let content = &memory.content;
     
-    let mentioned_concepts: Vec<String> = Vec::new();
-    
     let significant_words: Vec<&str> = content.split(|c: char| !c.is_alphanumeric())
         .filter(|word| {
             let w = word.to_lowercase();
@@ -535,7 +533,9 @@ fn extract_and_create_graph_nodes(graph: &mut GraphStore, memory: &MemoryObject)
         .take(10)
         .collect();
     
-    for concept in top_words {
+    let concepts_for_edges: Vec<String> = top_words.clone();
+    
+    for concept in &top_words {
         let label = concept.clone();
         let properties = serde_json::json!({
             "source": "auto_extracted",
@@ -555,10 +555,10 @@ fn extract_and_create_graph_nodes(graph: &mut GraphStore, memory: &MemoryObject)
         }
     }
     
-    for i in 0..mentioned_concepts.len() {
-        for j in (i + 1)..mentioned_concepts.len() {
-            let source_node = mentioned_concepts[i].clone();
-            let target_node = mentioned_concepts[j].clone();
+    for i in 0..concepts_for_edges.len() {
+        for j in (i + 1)..concepts_for_edges.len() {
+            let source_node = concepts_for_edges[i].clone();
+            let target_node = concepts_for_edges[j].clone();
             
             if let (Ok(source), Ok(target)) = (
                 graph.create_node("concept".to_string(), source_node.clone(), serde_json::json!({"source": "auto_extracted"}), vec![]),
