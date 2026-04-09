@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use crate::agents::{ContradictionDetectorAgent, RetrieverAgent};
-    use crate::models::graph::{GraphEdge, GraphNode};
+    use crate::agents::ContradictionDetectorAgent;
+    use crate::models::belief::{BeliefState, ConflictFlag};
+    use crate::models::graph::GraphNode;
     use crate::models::memory::MemoryObject;
     use crate::reasoning::ReasoningEngine;
-    use crate::retrieval::{RetrievalEngine, RetrievalResult};
-    use std::path::PathBuf;
+    use crate::retrieval::RetrievalResult;
     use tempfile::TempDir;
 
     #[test]

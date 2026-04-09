@@ -134,7 +134,7 @@ impl BackupManager {
         Ok(())
     }
 
-    pub fn export_data(&self, export_path: &Path) -> Result<File> {
+    pub fn export_data(&self, export_path: &Path) -> Result<()> {
         let mut file = File::create(export_path)?;
 
         let memories_dir = self.data_dir.join("memories");
@@ -148,7 +148,7 @@ impl BackupManager {
             }
         }
 
-        Ok(file)
+        Ok(())
     }
 
     pub fn import_data(&self, import_path: &Path) -> Result<u64> {

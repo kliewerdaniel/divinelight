@@ -32,6 +32,7 @@ impl From<anyhow::Error> for AppError {
 }
 
 pub struct AppState {
+    pub data_dir: std::path::PathBuf,
     pub memory: Mutex<MemoryStore>,
     pub graph: Mutex<GraphStore>,
     pub retrieval: Mutex<RetrievalEngine>,
@@ -250,7 +251,12 @@ async fn create_node(
     Json(req): Json<CreateNodeRequest>,
 ) -> Result<AxumJson<GraphNode>, AppError> {
     let graph = state.graph.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let node = graph.create_node(req.node_type, req.label, req.properties, req.provenance)?;
+    let node = graph.get_or_create_node(
+        req.node_type,
+        req.label,
+        req.properties,
+        req.provenance,
+    )?;
     Ok(AxumJson(node))
 }
 
@@ -396,12 +402,14 @@ async fn interpret(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InterpretRequest>,
 ) -> Result<AxumJson<InterpretResponse>, AppError> {
-    let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let results = retrieval.search(&req.query, 10)?;
-    
+    let results = {
+        let retrieval = state.retrieval.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        retrieval.search(&req.query, 10)?
+    };
+
     let reasoning = state.reasoning.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
     let response = reasoning.interpret(&req.query, results)?;
-    
+
     Ok(AxumJson(response))
 }
 
@@ -536,15 +544,11 @@ pub struct BackupResponse {
 }
 
 async fn create_backup(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
 ) -> Result<AxumJson<BackupResponse>, AppError> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("divinelight");
-    
     let backup_path = std::path::PathBuf::from(&req.path);
-    let manager = BackupManager::new(data_dir);
+    let manager = BackupManager::new(state.data_dir.clone());
     
     let manifest = manager.create_backup(&backup_path)?;
     Ok(AxumJson(BackupResponse {
@@ -554,15 +558,11 @@ async fn create_backup(
 }
 
 async fn restore_backup(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
 ) -> Result<AxumJson<BackupResponse>, AppError> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("divinelight");
-    
     let backup_path = std::path::PathBuf::from(&req.path);
-    let manager = BackupManager::new(data_dir);
+    let manager = BackupManager::new(state.data_dir.clone());
     
     manager.restore_backup(&backup_path)?;
     Ok(AxumJson(BackupResponse {
@@ -572,15 +572,11 @@ async fn restore_backup(
 }
 
 async fn export_data(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
 ) -> Result<AxumJson<BackupResponse>, AppError> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("divinelight");
-    
     let export_path = std::path::PathBuf::from(&req.path);
-    let manager = BackupManager::new(data_dir);
+    let manager = BackupManager::new(state.data_dir.clone());
     
     manager.export_data(&export_path)?;
     Ok(AxumJson(BackupResponse {
@@ -590,15 +586,11 @@ async fn export_data(
 }
 
 async fn import_data(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
 ) -> Result<AxumJson<BackupResponse>, AppError> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("divinelight");
-    
     let import_path = std::path::PathBuf::from(&req.path);
-    let manager = BackupManager::new(data_dir);
+    let manager = BackupManager::new(state.data_dir.clone());
     
     let count = manager.import_data(&import_path)?;
     Ok(AxumJson(BackupResponse {

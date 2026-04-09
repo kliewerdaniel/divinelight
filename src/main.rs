@@ -112,6 +112,7 @@ async fn main() {
     let reasoning_engine = ReasoningEngine::new();
 
     let state = Arc::new(AppState {
+        data_dir: config.data_dir.clone(),
         memory: Mutex::new(memory_store),
         graph: Mutex::new(graph_store),
         retrieval: Mutex::new(retrieval_engine),
